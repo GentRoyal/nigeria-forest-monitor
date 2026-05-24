@@ -1,0 +1,132 @@
+# ============================================================
+# Nigeria Forest Monitor — Master Config
+# ============================================================
+
+project:
+  name: "nigeria-forest-monitor"
+  description: "SAR-based forest anomaly detection for security monitoring"
+  version: "0.1.0"
+
+# ============================================================
+# AREA OF INTEREST
+# Covers the Old Oyo NP → Kwara border → Kainji corridor
+# ============================================================
+aoi:
+  # Bounding box [lon_min, lat_min, lon_max, lat_max]
+  bbox: [2.8, 7.8, 5.2, 10.2]
+
+  # Named sub-zones for focused analysis
+  zones:
+    old_oyo_core:
+      name: "Old Oyo National Park (core)"
+      bbox: [3.6, 8.2, 4.6, 9.2]
+
+    kwara_border:
+      name: "Kwara State border corridor"
+      bbox: [3.8, 9.0, 5.0, 9.8]
+
+    kainji_link:
+      name: "Kainji NP linkage corridor (Niger State edge)"
+      bbox: [4.4, 9.5, 5.2, 10.2]
+
+# ============================================================
+# SENTINEL-1 SAR PARAMETERS
+# ============================================================
+sentinel1:
+  collection: "COPERNICUS/S1_GRD"
+  instrument_mode: "IW"                  # Interferometric Wide swath
+  polarisation: ["VV", "VH"]            # VV = structure, VH = vegetation
+  orbit_pass: "ASCENDING"              # More consistent over West Africa
+  resolution_m: 10                       # Native GEE resolution
+
+  # Baseline: historical "normal" period (pre-insurgency escalation)
+  baseline_start: "2020-01-01"
+  baseline_end:   "2022-12-31"
+
+  # Monitoring window: active surveillance period
+  monitor_start: "2023-01-01"
+  monitor_end:   "2025-12-31"          # Update as project runs
+
+  # Composite interval for change detection
+  composite_days: 30                    # Monthly composites
+
+# ============================================================
+# GRID
+# Each cell is one unit of analysis for risk scoring
+# ============================================================
+grid:
+  resolution_deg: 0.05                  # ~5.5 km per cell (good for forest monitoring)
+  crs: "EPSG:4326"
+
+# ============================================================
+# CHANGE DETECTION
+# ============================================================
+change_detection:
+  method: "log_ratio"                   # log(current / baseline) per pixel
+  polarisation: "VV"                    # Primary channel for structural change
+  threshold_sigma: 2.0                  # Flag cells > 2 std dev from baseline
+  min_patch_size_px: 10                 # Ignore changes smaller than this (noise filter)
+
+# ============================================================
+# CLASSIFIER (CNN patch classifier)
+# ============================================================
+classifier:
+  patch_size_px: 64                     # 64x64 SAR patch per sample
+  classes:
+    0: "normal_forest"
+    1: "clearing"
+    2: "structure"
+    3: "path_or_track"
+  train_split: 0.7
+  val_split:   0.15
+  test_split:  0.15
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.0001
+  early_stopping_patience: 10
+
+# ============================================================
+# RISK SCORER
+# ============================================================
+risk:
+  # Weights for fusing signals into a single risk score (must sum to 1.0)
+  weights:
+    change_detection: 0.40              # SAR anomaly magnitude
+    classifier:       0.35              # CNN patch label confidence
+    acled_proximity:  0.25              # Distance to historical incidents
+
+  # Alert threshold (0–1 risk score)
+  alert_threshold: 0.65
+  high_risk_threshold: 0.80
+
+# ============================================================
+# ACLED (Armed Conflict Location & Event Data)
+# ============================================================
+acled:
+  country: "Nigeria"
+  event_types:
+    - "Violence against civilians"
+    - "Battles"
+    - "Explosions/Remote violence"
+  actor_filter: ["Boko Haram", "bandits", "unidentified armed group"]
+  proximity_radius_km: 30               # Flag grid cells within this distance
+
+# ============================================================
+# PATHS  (relative to project root)
+# ============================================================
+paths:
+  raw_sar:       "data/raw/sar"
+  processed_sar: "data/processed/sar"
+  labels:        "data/labels"
+  acled:         "data/acled"
+  models:        "models"
+  reports:       "reports"
+  figures:       "reports/figures"
+
+# ============================================================
+# DASHBOARD
+# ============================================================
+dashboard:
+  map_center: [9.0, 4.0]               # Lat, Lon — centre of AOI
+  map_zoom: 8
+  alert_report_day: "Monday"           # Day of week to generate weekly PDF
