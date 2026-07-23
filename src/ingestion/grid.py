@@ -7,19 +7,11 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from shapely.geometry import box, Point
-import yaml
 import ee
 from pathlib import Path
 from loguru import logger
+from src.config import load_config, resolve_path
 
-
-# ============================================================
-# Load config
-# ============================================================
-
-def load_config(config_path: str = "configs/config.yaml") -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
 
 
 # ============================================================
@@ -27,58 +19,49 @@ def load_config(config_path: str = "configs/config.yaml") -> dict:
 # ============================================================
 
 def create_grid(config: dict, zone: str = "full") -> gpd.GeoDataFrame:
-    """
-    Build a regular lat/lon grid over the AOI.
-    Each cell is resolution_deg x resolution_deg degrees.
-
-    Returns a GeoDataFrame with columns:
-        cell_id, lat, lon, geometry, zone
-    """
-    res = config["grid"]["resolution_deg"]
+    """Build a bounded regular grid over the configured AOI."""
+    res = float(config["grid"]["resolution_deg"])
     crs = config["grid"]["crs"]
-
-    # Select bbox
+    if res <= 0:
+        raise ValueError("grid.resolution_deg must be positive")
     if zone == "full":
-        lon_min, lat_min, lon_max, lat_max = config["aoi"]["bbox"]
+        lon_min, lat_min, lon_max, lat_max = map(float, config["aoi"]["bbox"])
         zone_label = "full"
     else:
-        lon_min, lat_min, lon_max, lat_max = config["aoi"]["zones"][zone]["bbox"]
+        try:
+            lon_min, lat_min, lon_max, lat_max = map(float, config["aoi"]["zones"][zone]["bbox"])
+        except KeyError as exc:
+            raise ValueError(f"Unknown zone: {zone}") from exc
         zone_label = zone
 
-    # Generate grid cell origins (bottom-left corners)
-    lons = np.arange(lon_min, lon_max, res)
-    lats = np.arange(lat_min, lat_max, res)
-
+    lon_count = int(np.ceil((lon_max - lon_min) / res - 1e-12))
+    lat_count = int(np.ceil((lat_max - lat_min) / res - 1e-12))
     records = []
     cell_id = 0
-
-    for lat in lats:
-        for lon in lons:
-            centroid_lat = round(lat + res / 2, 6)
-            centroid_lon = round(lon + res / 2, 6)
-            cell_geom = box(lon, lat, lon + res, lat + res)
-
+    for lat_index in range(lat_count):
+        bottom = lat_min + lat_index * res
+        top = min(bottom + res, lat_max)
+        for lon_index in range(lon_count):
+            left = lon_min + lon_index * res
+            right = min(left + res, lon_max)
             records.append({
-                "cell_id":      cell_id,
-                "lat":          centroid_lat,   # centroid (not corner)
-                "lon":          centroid_lon,
-                "lat_min":      round(lat, 6),
-                "lon_min":      round(lon, 6),
-                "lat_max":      round(lat + res, 6),
-                "lon_max":      round(lon + res, 6),
-                "zone":         zone_label,
-                "geometry":     cell_geom
+                "cell_id": cell_id,
+                "lat": round((bottom + top) / 2, 6),
+                "lon": round((left + right) / 2, 6),
+                "lat_min": round(bottom, 6),
+                "lon_min": round(left, 6),
+                "lat_max": round(top, 6),
+                "lon_max": round(right, 6),
+                "zone": zone_label,
+                "geometry": box(left, bottom, right, top),
             })
             cell_id += 1
 
-    gdf = gpd.GeoDataFrame(records, crs=crs)
-
+    grid = gpd.GeoDataFrame(records, crs=crs)
     logger.success(
-        f"Grid created: {len(gdf)} cells | "
-        f"res={res}° (~{res * 111:.1f} km) | zone={zone_label}"
+        f"Grid created: {len(grid)} cells | res={res}° (~{res * 111:.1f} km) | zone={zone_label}"
     )
-    return gdf
-
+    return grid
 
 # ============================================================
 # Tag cells by named zone
@@ -96,7 +79,10 @@ def tag_zones(grid: gpd.GeoDataFrame, config: dict) -> gpd.GeoDataFrame:
         lon_min, lat_min, lon_max, lat_max = zone_cfg["bbox"]
         zone_box = box(lon_min, lat_min, lon_max, lat_max)
 
-        mask = grid.geometry.centroid.within(zone_box)
+        centroids = gpd.GeoSeries(
+            gpd.points_from_xy(grid["lon"], grid["lat"]), crs=grid.crs
+        )
+        mask = centroids.within(zone_box)
         grid.loc[mask, "zone"] = zone_key
 
     counts = grid["zone"].value_counts().to_dict()
@@ -144,46 +130,34 @@ def grid_to_ee_feature_collection(grid: gpd.GeoDataFrame) -> ee.FeatureCollectio
 def apply_forest_mask(
     grid: gpd.GeoDataFrame,
     config: dict,
-    tree_cover_threshold: int = 30
+    tree_cover_threshold: int = 30,
 ) -> gpd.GeoDataFrame:
-    """
-    Filter grid cells to only those with significant tree cover.
-    Uses Hansen Global Forest Change dataset (GEE).
-    Removes urban, agricultural, and water cells from analysis.
+    """Keep forest cells using one server-side Hansen reduction."""
+    if grid.empty:
+        return grid.copy()
+    if not 0 <= tree_cover_threshold <= 100:
+        raise ValueError("tree_cover_threshold must be between 0 and 100")
 
-    tree_cover_threshold: minimum % canopy cover to keep cell (default 30%)
-    """
     logger.info(f"Applying forest mask (tree cover >= {tree_cover_threshold}%)...")
-
-    hansen = ee.Image("UMD/hansen/global_forest_change_2023_v1_11")
-    tree_cover = hansen.select("treecover2000")
-
-    keep_ids = []
-    for _, row in grid.iterrows():
-        cell_geom = cell_to_ee_geometry(row)
-        mean_cover = (
-            tree_cover
-            .reduceRegion(
-                reducer  = ee.Reducer.mean(),
-                geometry = cell_geom,
-                scale    = 30,
-                maxPixels= 1e6
-            )
-            .get("treecover2000")
-            .getInfo()
-        )
-        if mean_cover is not None and mean_cover >= tree_cover_threshold:
-            keep_ids.append(row["cell_id"])
-
+    tree_cover = ee.Image("UMD/hansen/global_forest_change_2023_v1_11").select("treecover2000")
+    reduced = tree_cover.reduceRegions(
+        collection=grid_to_ee_feature_collection(grid),
+        reducer=ee.Reducer.mean(),
+        scale=30,
+        tileScale=8,
+    ).getInfo()
+    keep_ids = {
+        int(feature["properties"]["cell_id"])
+        for feature in reduced.get("features", [])
+        if feature.get("properties", {}).get("mean") is not None
+        and float(feature["properties"]["mean"]) >= tree_cover_threshold
+    }
     forest_grid = grid[grid["cell_id"].isin(keep_ids)].copy()
-    removed = len(grid) - len(forest_grid)
-
     logger.success(
         f"Forest mask applied: {len(forest_grid)} forest cells kept, "
-        f"{removed} non-forest cells removed"
+        f"{len(grid) - len(forest_grid)} non-forest cells removed"
     )
     return forest_grid
-
 
 # ============================================================
 # Save / load grid
@@ -191,7 +165,7 @@ def apply_forest_mask(
 
 def save_grid(grid: gpd.GeoDataFrame, config: dict, name: str = "grid") -> Path:
     """Save grid to processed data folder as GeoPackage."""
-    out_dir = Path(config["paths"]["processed_sar"]).parent
+    out_dir = resolve_path(config, "processed_sar", create=True).parent
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{name}.gpkg"
     grid.to_file(out_path, driver="GPKG")
@@ -201,7 +175,7 @@ def save_grid(grid: gpd.GeoDataFrame, config: dict, name: str = "grid") -> Path:
 
 def load_grid(config: dict, name: str = "grid") -> gpd.GeoDataFrame:
     """Load a previously saved grid."""
-    path = Path(config["paths"]["processed_sar"]).parent / f"{name}.gpkg"
+    path = resolve_path(config, "processed_sar").parent / f"{name}.gpkg"
     if not path.exists():
         raise FileNotFoundError(f"Grid not found at {path}. Run create_grid() first.")
     grid = gpd.read_file(path)

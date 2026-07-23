@@ -68,10 +68,14 @@ change_detection:
   min_patch_size_px: 10                 # Ignore changes smaller than this (noise filter)
 
 # ============================================================
-# CLASSIFIER (CNN patch classifier)
+# CLASSIFIER (memory-safe SAR feature classifier)
 # ============================================================
 classifier:
-  patch_size_px: 64                     # 64x64 SAR patch per sample
+  architecture: "feature_mlp"             # Statistical SAR features; avoids large raster downloads
+  sampling_scale_m: 100                  # Max-aggregated mask preserves 10 m detections
+  neighborhood_radius_px: 3             # Local context around each sampled point
+  n_samples: 200
+  seed: 42
   classes:
     0: "normal_forest"
     1: "clearing"
@@ -92,7 +96,7 @@ risk:
   # Weights for fusing signals into a single risk score (must sum to 1.0)
   weights:
     change_detection: 0.40              # SAR anomaly magnitude
-    classifier:       0.35              # CNN patch label confidence
+    classifier:       0.35              # Feature-model suspicious-class confidence
     acled_proximity:  0.25              # Distance to historical incidents
 
   # Alert threshold (0–1 risk score)

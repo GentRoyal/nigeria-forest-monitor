@@ -16,12 +16,12 @@
 # ============================================================
 
 import ee
-import yaml
 import json
 import numpy as np
 from pathlib import Path
 from loguru import logger
 from datetime import datetime
+from src.config import load_config, resolve_path
 
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
@@ -148,18 +148,14 @@ def clean_change_mask(
     elif min_pixels is None:
         min_pixels = 10
 
-    # Label connected components
-    labeled = change_mask.connectedComponents(
-        connectedness = ee.Kernel.plus(1),
-        maxSize       = 1024
+    # Count connected changed pixels directly. Using min_pixels as maxSize is
+    # sufficient because only the >= min_pixels decision is required and it
+    # avoids materialising a full component-label raster.
+    binary = change_mask.gt(0).selfMask()
+    area = binary.connectedPixelCount(
+        maxSize=max(2, min_pixels), eightConnected=True
     )
-
-    # Keep only components with area >= min_pixels
-    area = labeled.select("labels").connectedPixelCount(
-        maxSize=1024, eightConnected=False
-    )
-    cleaned = change_mask.updateMask(area.gte(min_pixels))
-    cleaned = cleaned.unmask(0).rename("change_mask_clean")
+    cleaned = binary.updateMask(area.gte(min_pixels)).unmask(0).rename("change_mask")
 
     logger.info(f"Change mask cleaned (min patch: {min_pixels} pixels)")
     return cleaned
@@ -283,8 +279,8 @@ def compute_change_stats(
         maxPixels= 1e9
     ).getInfo()
 
-    changed_px  = total_stats.get("change_mask_clean_sum",   0) or 0
-    total_px    = total_stats.get("change_mask_clean_count", 1) or 1
+    changed_px  = total_stats.get("change_mask_sum",   0) or 0
+    total_px    = total_stats.get("change_mask_count", 1) or 1
     changed_pct = (changed_px / total_px) * 100
 
     result = {
@@ -303,70 +299,57 @@ def compute_change_stats(
 
 def score_grid_cells(
     change_mask: ee.Image,
-    log_ratio:   ee.Image,
-    grid:        "gpd.GeoDataFrame",
-    config:      dict,
-    scale:       int = 100
+    log_ratio: ee.Image,
+    grid: "gpd.GeoDataFrame",
+    config: dict,
+    scale: int = 100,
 ) -> "gpd.GeoDataFrame":
-    """
-    Compute a change score (0-1) for each grid cell.
-    This feeds directly into the risk scorer.
+    """Compute cell scores with one server-side reduceRegions request."""
+    import pandas as pd
+    from src.ingestion.grid import grid_to_ee_feature_collection
 
-    Score = (fraction of cell that changed) × (mean intensity)
-    Normalised to [0, 1] across all cells.
-    """
-    import geopandas as gpd
-    import numpy as np
-    from src.ingestion.grid import cell_to_ee_geometry
+    if grid.empty:
+        result = grid.copy()
+        for column in ("changed_frac", "mean_intensity", "change_score"):
+            result[column] = 0.0
+        return result
 
     logger.info(f"Scoring {len(grid)} grid cells for change...")
+    metrics = ee.Image.cat([
+        change_mask.gt(0).rename("changed_frac"),
+        log_ratio.abs().rename("mean_intensity"),
+    ])
+    reduced = metrics.reduceRegions(
+        collection=grid_to_ee_feature_collection(grid),
+        reducer=ee.Reducer.mean(),
+        scale=max(scale, int(config["sentinel1"]["resolution_m"])),
+        tileScale=8,
+    ).getInfo()
 
-    scores = []
-    for _, row in grid.iterrows():
-        cell_geom = cell_to_ee_geometry(row)
-
-        cell_stats = change_mask.reduceRegion(
-            reducer  = ee.Reducer.mean(),
-            geometry = cell_geom,
-            scale    = scale,
-            maxPixels= 1e6
-        ).getInfo()
-
-        ratio_stats = log_ratio.abs().reduceRegion(
-            reducer  = ee.Reducer.mean(),
-            geometry = cell_geom,
-            scale    = scale,
-            maxPixels= 1e6
-        ).getInfo()
-
-        changed_frac  = cell_stats.get("change_mask_clean", 0) or 0
-        mean_intensity = ratio_stats.get("log_ratio", 0) or 0
-
-        scores.append({
-            "cell_id":        row["cell_id"],
-            "changed_frac":   round(changed_frac, 4),
-            "mean_intensity": round(mean_intensity, 4),
-            "change_score":   round(changed_frac * min(mean_intensity / 10, 1), 4)
+    records = []
+    for feature in reduced.get("features", []):
+        props = feature.get("properties", {})
+        changed = float(props.get("changed_frac") or 0.0)
+        intensity = float(props.get("mean_intensity") or 0.0)
+        records.append({
+            "cell_id": int(props["cell_id"]),
+            "changed_frac": changed,
+            "mean_intensity": intensity,
+            "change_score": changed * min(intensity / 10.0, 1.0),
         })
 
-    scores_df = gpd.GeoDataFrame(scores)
+    scores = pd.DataFrame.from_records(records)
+    if scores.empty:
+        scores = pd.DataFrame({"cell_id": grid["cell_id"], "changed_frac": 0.0, "mean_intensity": 0.0, "change_score": 0.0})
+    maximum = float(scores["change_score"].max())
+    if maximum > 0:
+        scores["change_score"] = (scores["change_score"] / maximum).clip(0, 1)
 
-    # Normalise change_score to [0, 1]
-    max_score = scores_df["change_score"].max()
-    if max_score > 0:
-        scores_df["change_score"] = (
-            scores_df["change_score"] / max_score
-        ).clip(0, 1)
-
-    grid_scored = grid.merge(scores_df, on="cell_id", how="left")
-    grid_scored["change_score"] = grid_scored["change_score"].fillna(0.0)
-
-    hot = (grid_scored["change_score"] > 0.3).sum()
-    logger.success(
-        f"Grid scoring complete | {hot} high-change cells (score > 0.3)"
-    )
-    return grid_scored
-
+    result = grid.merge(scores, on="cell_id", how="left")
+    for column in ("changed_frac", "mean_intensity", "change_score"):
+        result[column] = result[column].fillna(0.0)
+    logger.success(f"Grid scoring complete | {int((result['change_score'] > 0.3).sum())} high-change cells")
+    return result
 
 # ============================================================
 # Preview in notebook
@@ -416,7 +399,7 @@ def save_change_stats(
     config: dict
 ) -> Path:
     """Save change detection stats to disk for tracking over time."""
-    out_dir  = Path(config["paths"]["processed_sar"]) / "change_stats"
+    out_dir  = resolve_path(config, "processed_sar", create=True) / "change_stats"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"change_{label}.json"
 

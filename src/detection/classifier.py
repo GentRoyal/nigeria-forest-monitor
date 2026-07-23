@@ -1,407 +1,406 @@
-# ============================================================
-# src/detection/classifier.py
-#
-# CNN patch classifier for SAR anomaly typing.
-# Fully server-side patch extraction — no sampleRectangle.
-#
-# Classes:
-#   0 = normal_forest
-#   1 = clearing
-#   2 = structure
-#   3 = path_or_track
-# ============================================================
+"""Memory-safe SAR feature extraction and classification.
+
+The classifier intentionally consumes compact neighbourhood statistics instead
+of downloading image patches.  Earth Engine computes the statistics and only a
+small bounded table crosses the network.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
 
 import ee
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import yaml
-import json
-from pathlib import Path
 from loguru import logger
-from datetime import datetime
+from torch.utils.data import DataLoader, Dataset
 
+from src.config import PROJECT_ROOT, load_config
 
-def load_config(config_path: str = "configs/config.yaml") -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-CLASS_NAMES = {
-    0: "normal_forest",
-    1: "clearing",
-    2: "structure",
-    3: "path_or_track"
-}
-
+CLASS_NAMES = {0: "normal_forest", 1: "clearing", 2: "structure", 3: "path_or_track"}
 SUSPICIOUS_CLASSES = {1, 2, 3}
-PATCH_SIZE  = 16    # 16x16 neighbourhood — small, fast, memory-safe
-SCALE_M     = 100   # 100m per pixel — coarse but avoids memory errors
-N_FEATURES  = 6     # VV, VH, VV_mean, VH_mean, VV_std, VH_std
+FEATURE_NAMES = ("VV", "VH", "VV_mean", "VH_mean", "VV_std", "VH_std")
+N_FEATURES = len(FEATURE_NAMES)
 
-
-# ============================================================
-# Model: Feature-based MLP
-# (replaces CNN — works with neighbourhood statistics
-#  instead of raw pixel arrays, fully memory-safe)
-# ============================================================
 
 class SARFeatureMLP(nn.Module):
-    """
-    MLP classifier on SAR neighbourhood statistics.
-    Input:  (batch, N_FEATURES)  — per-point feature vector
-    Output: (batch, 4)           — class logits
+    """Small MLP for six SAR neighbourhood features."""
 
-    Features per point:
-        VV, VH                   — raw backscatter at point
-        VV_mean, VH_mean         — mean in 16x16 neighbourhood
-        VV_std,  VH_std          — std in 16x16 neighbourhood
-
-    ~50k parameters — instant on CPU
-    """
     def __init__(self, num_classes: int = 4, n_features: int = N_FEATURES):
         super().__init__()
-        self.net = nn.Sequential(
+        self.n_features = n_features
+        self.register_buffer("feature_mean", torch.zeros(n_features))
+        self.register_buffer("feature_scale", torch.ones(n_features))
+        self.classifier = nn.Sequential(
             nn.Linear(n_features, 64),
-            nn.BatchNorm1d(64),
+            nn.LayerNorm(64),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, 128),
-            nn.BatchNorm1d(128),
+            nn.Dropout(0.25),
+            nn.Linear(64, 64),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, num_classes)
+            nn.Dropout(0.15),
+            nn.Linear(64, num_classes),
         )
+
+    def set_scaler(self, features: np.ndarray) -> None:
+        mean = np.nanmean(features, axis=0).astype(np.float32)
+        scale = np.nanstd(features, axis=0).astype(np.float32)
+        scale[scale < 1e-6] = 1.0
+        self.feature_mean.copy_(torch.from_numpy(mean))
+        self.feature_scale.copy_(torch.from_numpy(scale))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        x = (x - self.feature_mean) / self.feature_scale
+        return self.classifier(x)
 
 
-# ============================================================
-# Dataset
-# ============================================================
+# Backward-compatible name used by existing notebooks and checkpoints.
+SARPatchCNN = SARFeatureMLP
+
 
 class SARFeatureDataset(Dataset):
-    def __init__(self, features: np.ndarray, labels: np.ndarray):
-        self.features = torch.tensor(features, dtype=torch.float32)
-        self.labels   = torch.tensor(labels,   dtype=torch.long)
+    def __init__(self, features: np.ndarray, labels: np.ndarray, augment: bool = False):
+        self.features = torch.as_tensor(features, dtype=torch.float32)
+        self.labels = torch.as_tensor(labels, dtype=torch.long)
+        self.augment = augment
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.labels)
 
-    def __getitem__(self, idx):
-        return self.features[idx], self.labels[idx]
+    def __getitem__(self, index: int):
+        feature = self.features[index]
+        if self.augment:
+            feature = feature + torch.randn_like(feature) * 0.01
+        return feature, self.labels[index]
 
 
-# ============================================================
-# Fully server-side feature extraction
-# ============================================================
+# Backward-compatible dataset name.
+SARPatchDataset = SARFeatureDataset
 
-def extract_features_from_gee(
-    image:       ee.Image,
+
+def _feature_image(image: ee.Image, radius: int) -> ee.Image:
+    base = image.select(["VV", "VH"])
+    kernel = ee.Kernel.square(radius=radius, units="pixels")
+    means = base.reduceNeighborhood(ee.Reducer.mean(), kernel).rename(["VV_mean", "VH_mean"])
+    stds = base.reduceNeighborhood(ee.Reducer.stdDev(), kernel).rename(["VV_std", "VH_std"])
+    return base.addBands(means).addBands(stds).select(list(FEATURE_NAMES))
+
+
+def _is_capacity_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return any(token in message for token in ("too large", "memory limit", "timed out", "capacity"))
+
+
+def extract_patches_from_gee(
+    image: ee.Image,
     change_mask: ee.Image,
-    aoi:         ee.Geometry,
-    config:      dict,
-    n_samples:   int = 300,
-    include_normal: bool = True
-) -> tuple:
+    aoi: ee.Geometry,
+    config: dict,
+    n_patches: int | None = None,
+) -> np.ndarray:
+    """Extract a bounded table of SAR features from changed pixels.
+
+    Sampling starts at ``classifier.sampling_scale_m`` and automatically retries
+    at coarser scales for Earth Engine capacity failures.  No collection size
+    reduction is performed, avoiding the full-resolution count that caused the
+    recurring 80 MiB notebook error.
     """
-    Extract SAR features entirely server-side using GEE.
-    No sampleRectangle — no memory errors.
+    classifier_cfg = config["classifier"]
+    native_scale = int(config["sentinel1"]["resolution_m"])
+    start_scale = max(int(classifier_cfg.get("sampling_scale_m", 100)), native_scale)
+    radius = max(1, int(classifier_cfg.get("neighborhood_radius_px", 3)))
+    requested = int(n_patches or classifier_cfg.get("n_samples", 200))
+    seed = int(classifier_cfg.get("seed", 42))
+    if requested <= 0:
+        raise ValueError("n_patches must be greater than zero")
 
-    For each sampled point computes:
-        VV, VH                  raw backscatter
-        VV_mean, VH_mean        neighbourhood mean (16x16 @ 100m)
-        VV_std,  VH_std         neighbourhood std
+    base_features = _feature_image(image, radius)
+    native_projection = image.select("VV").projection()
+    scales = tuple(dict.fromkeys((start_scale, start_scale * 2, start_scale * 4)))
+    last_error: Exception | None = None
 
-    Returns:
-        features: np.ndarray (N, 6)
-        is_changed: np.ndarray (N,) bool — True if from changed pixel
-    """
-    kernel = ee.Kernel.square(radius=PATCH_SIZE // 2, units="pixels")
-
-    # Neighbourhood statistics — fully server-side
-    vv_mean = image.select("VV").reduceNeighborhood(ee.Reducer.mean(),   kernel).rename("VV_mean")
-    vh_mean = image.select("VH").reduceNeighborhood(ee.Reducer.mean(),   kernel).rename("VH_mean")
-    vv_std  = image.select("VV").reduceNeighborhood(ee.Reducer.stdDev(), kernel).rename("VV_std")
-    vh_std  = image.select("VH").reduceNeighborhood(ee.Reducer.stdDev(), kernel).rename("VH_std")
-
-    feature_image = image.select(["VV", "VH"]).addBands([
-        vv_mean, vh_mean, vv_std, vh_std
-    ])
-
-    all_features  = []
-    all_changed   = []
-
-    # --- Sample from CHANGED pixels ---
-    changed_samples = (
-        feature_image
-        .updateMask(change_mask)
-        .sample(
-            region     = aoi,
-            scale      = SCALE_M,
-            numPixels  = n_samples,
-            seed       = 42,
-            tileScale  = 16,        # aggressive tiling — prevents memory errors
-            geometries = False
-        )
-    )
-
-    changed_count = changed_samples.size().getInfo()
-
-    if changed_count > 0:
-        changed_list = changed_samples.toList(changed_count).getInfo()
-        for item in changed_list:
-            props = item["properties"]
-            row   = [
-                props.get("VV",      -15.0),
-                props.get("VH",      -20.0),
-                props.get("VV_mean", -15.0),
-                props.get("VH_mean", -20.0),
-                props.get("VV_std",    2.0),
-                props.get("VH_std",    2.0),
-            ]
-            all_features.append(row)
-            all_changed.append(True)
-
-        logger.info(f"Changed pixels sampled: {changed_count}")
-
-    # --- Sample from NORMAL (unchanged) pixels for context ---
-    if include_normal:
-        normal_mask    = change_mask.Not()
-        normal_samples = (
-            feature_image
-            .updateMask(normal_mask)
-            .sample(
-                region     = aoi,
-                scale      = SCALE_M,
-                numPixels  = n_samples // 2,
-                seed       = 99,
-                tileScale  = 16,
-                geometries = False
+    for scale in scales:
+        try:
+            logger.info(f"Sampling up to {requested} changed locations at {scale} m...")
+            if scale > native_scale:
+                sampling_mask = change_mask.reduceResolution(
+                    reducer=ee.Reducer.max(), bestEffort=True, maxPixels=1024
+                ).reproject(crs=native_projection, scale=scale)
+            else:
+                sampling_mask = change_mask
+            features_image = base_features.addBands(
+                sampling_mask.gt(0).rename("change_class")
+            ).clip(aoi)
+            collection = features_image.stratifiedSample(
+                numPoints=0,
+                classBand="change_class",
+                region=aoi,
+                scale=scale,
+                classValues=[1],
+                classPoints=[requested],
+                seed=seed,
+                dropNulls=True,
+                tileScale=16,
+                geometries=False,
             )
-        )
+            payload = collection.getInfo()
+            items = payload.get("features", []) if isinstance(payload, dict) else []
+            rows = []
+            for item in items:
+                properties = item.get("properties", {})
+                if properties.get("change_class") == 1 and all(
+                    properties.get(name) is not None for name in FEATURE_NAMES
+                ):
+                    rows.append([float(properties[name]) for name in FEATURE_NAMES])
+            if not rows:
+                logger.warning("No changed pixels produced complete SAR features")
+                return np.empty((0, N_FEATURES), dtype=np.float32)
+            features = np.asarray(rows, dtype=np.float32)
+            logger.success(f"Extracted {len(features)} feature vectors at {scale} m")
+            return features
+        except ee.EEException as error:
+            last_error = error
+            if not _is_capacity_error(error) or scale == scales[-1]:
+                raise
+            logger.warning(f"Earth Engine capacity limit at {scale} m; retrying coarser")
 
-        normal_count = normal_samples.size().getInfo()
+    if last_error is not None:
+        raise last_error
+    return np.empty((0, N_FEATURES), dtype=np.float32)
 
-        if normal_count > 0:
-            normal_list = normal_samples.toList(normal_count).getInfo()
-            for item in normal_list:
-                props = item["properties"]
-                row   = [
-                    props.get("VV",      -15.0),
-                    props.get("VH",      -20.0),
-                    props.get("VV_mean", -15.0),
-                    props.get("VH_mean", -20.0),
-                    props.get("VV_std",    2.0),
-                    props.get("VH_std",    2.0),
-                ]
-                all_features.append(row)
-                all_changed.append(False)
-
-            logger.info(f"Normal pixels sampled: {normal_count}")
-
-    if not all_features:
-        logger.warning("No features extracted")
-        return np.array([]), np.array([])
-
-    features   = np.array(all_features,  dtype=np.float32)
-    is_changed = np.array(all_changed,   dtype=bool)
-
-    # Normalise each feature to [0, 1]
-    features[:, 0:2] = (np.clip(features[:, 0:2], -30, 0) + 30) / 30.0
-    features[:, 2:4] = (np.clip(features[:, 2:4], -30, 0) + 30) / 30.0
-    features[:, 4:6] = np.clip(features[:, 4:6] / 10.0, 0, 1)
-
-    logger.success(
-        f"Features extracted: {len(features)} samples | "
-        f"changed={is_changed.sum()} normal={(~is_changed).sum()}"
-    )
-    return features, is_changed
-
-
-# ============================================================
-# Pseudo-labels
-# ============================================================
 
 def generate_pseudo_labels(
-    features:   np.ndarray,
-    is_changed: np.ndarray
+    features: np.ndarray,
+    change_scores: np.ndarray | None = None,
 ) -> np.ndarray:
-    """
-    Generate weak labels from SAR feature statistics.
+    """Generate deterministic weak labels for demonstrations only.
 
-    Logic (no manual annotation needed):
-      - Not changed                    → 0 normal_forest
-      - Changed + high VV_std          → 2 structure  (high texture)
-      - Changed + high VV, low VH      → 1 clearing   (bare ground)
-      - Changed + low VV_std           → 3 path_or_track (linear, smooth)
+    Production training should use reviewed labels.  The heuristic uses local
+    backscatter contrast and texture; an optional real change magnitude can
+    influence the clearing class.  Random scores should not be supplied.
     """
+    features = _validate_features(features, allow_empty=True)
+    if len(features) == 0:
+        return np.empty(0, dtype=np.int64)
+
+    vv, vh, vv_mean, vh_mean, vv_std, vh_std = features.T
+    contrast = np.abs(vv - vv_mean) + np.abs(vh - vh_mean)
+    texture = vv_std + vh_std
+    contrast_hi = np.quantile(contrast, 0.70)
+    texture_hi = np.quantile(texture, 0.70)
+    texture_lo = np.quantile(texture, 0.30)
+
     labels = np.zeros(len(features), dtype=np.int64)
+    labels[(contrast >= contrast_hi) & (texture < texture_hi)] = 1
+    labels[texture >= texture_hi] = 2
+    labels[(contrast >= np.median(contrast)) & (texture <= texture_lo)] = 3
 
-    vv      = features[:, 0]   # normalised VV
-    vh      = features[:, 1]   # normalised VH
-    vv_std  = features[:, 4]   # normalised VV std
+    if change_scores is not None:
+        scores = np.asarray(change_scores, dtype=float)
+        if scores.shape != (len(features),):
+            raise ValueError("change_scores must contain one value per feature row")
+        labels[(scores >= 0.8) & (labels == 0)] = 1
 
-    for i in range(len(features)):
-        if not is_changed[i]:
-            labels[i] = 0   # normal forest
-        elif vv_std[i] > 0.6:
-            labels[i] = 2   # structure — high texture
-        elif vv[i] > 0.5 and vh[i] < 0.4:
-            labels[i] = 1   # clearing — high VV, low VH
-        else:
-            labels[i] = 3   # path or track
-
-    counts = {CLASS_NAMES[i]: int((labels == i).sum()) for i in range(4)}
-    logger.info(f"Pseudo-labels: {counts}")
+    counts = {CLASS_NAMES[index]: int((labels == index).sum()) for index in CLASS_NAMES}
+    logger.info(f"Weak-label distribution: {counts}")
     return labels
 
 
-# ============================================================
-# Train
-# ============================================================
+def _validate_features(features: np.ndarray, *, allow_empty: bool = False) -> np.ndarray:
+    array = np.asarray(features, dtype=np.float32)
+    if array.ndim != 2 or array.shape[1] != N_FEATURES:
+        raise ValueError(f"features must have shape (N, {N_FEATURES}); got {array.shape}")
+    if not allow_empty and len(array) == 0:
+        raise ValueError("features cannot be empty")
+    if not np.isfinite(array).all():
+        raise ValueError("features contain NaN or infinite values")
+    return array
+
 
 def train_classifier(
-    features:  np.ndarray,
-    labels:    np.ndarray,
-    config:    dict,
-    save_path: str = None
+    patches: np.ndarray,
+    labels: np.ndarray,
+    config: dict,
+    save_path: str | Path | None = None,
 ) -> SARFeatureMLP:
-    """Train the SAR feature MLP."""
-    clf_cfg = config["classifier"]
-    n       = len(features)
-    n_train = int(n * clf_cfg["train_split"])
-    idx     = np.random.permutation(n)
+    features = _validate_features(patches)
+    labels = np.asarray(labels, dtype=np.int64)
+    if labels.shape != (len(features),):
+        raise ValueError("labels must contain one integer per feature row")
+    if len(features) < 8:
+        raise ValueError("At least 8 labelled samples are required for training")
+    if labels.min() < 0 or labels.max() >= len(CLASS_NAMES):
+        raise ValueError("labels must be integers from 0 to 3")
 
-    train_ds = SARFeatureDataset(features[idx[:n_train]], labels[idx[:n_train]])
-    val_ds   = SARFeatureDataset(features[idx[n_train:]], labels[idx[n_train:]])
-    train_dl = DataLoader(train_ds, batch_size=clf_cfg["batch_size"], shuffle=True)
-    val_dl   = DataLoader(val_ds,   batch_size=clf_cfg["batch_size"], shuffle=False)
+    cfg = config["classifier"]
+    seed = int(cfg.get("seed", 42))
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    indices = np.random.permutation(len(features))
+    val_fraction = float(cfg.get("val_split", 0.15))
+    val_count = max(1, int(round(len(features) * val_fraction)))
+    train_indices, val_indices = indices[val_count:], indices[:val_count]
+    if len(train_indices) < 2:
+        raise ValueError("Training split is too small")
 
-    model     = SARFeatureMLP(num_classes=len(CLASS_NAMES))
-    optimizer = optim.Adam(model.parameters(), lr=clf_cfg["learning_rate"])
-    criterion = nn.CrossEntropyLoss()
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
-
-    best_val_loss = float("inf")
-    patience_ctr  = 0
-    best_state    = None
-
-    logger.info(
-        f"Training MLP | train={len(train_ds)} val={len(val_ds)} | "
-        f"epochs={clf_cfg['epochs']} bs={clf_cfg['batch_size']}"
+    model = SARFeatureMLP(num_classes=len(CLASS_NAMES))
+    model.set_scaler(features[train_indices])
+    train_loader = DataLoader(
+        SARFeatureDataset(features[train_indices], labels[train_indices], augment=True),
+        batch_size=min(int(cfg["batch_size"]), len(train_indices)),
+        shuffle=True,
+    )
+    val_loader = DataLoader(
+        SARFeatureDataset(features[val_indices], labels[val_indices]),
+        batch_size=min(int(cfg["batch_size"]), len(val_indices)),
     )
 
-    for epoch in range(clf_cfg["epochs"]):
+    optimizer = optim.Adam(model.parameters(), lr=float(cfg["learning_rate"]))
+    criterion = nn.CrossEntropyLoss()
+    patience = int(cfg["early_stopping_patience"])
+    best_loss = float("inf")
+    best_state = None
+    stale_epochs = 0
+
+    for epoch in range(int(cfg["epochs"])):
         model.train()
-        train_loss = 0.0
-        for xb, yb in train_dl:
+        for batch_features, batch_labels in train_loader:
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+            loss = criterion(model(batch_features), batch_labels)
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
-        train_loss /= len(train_dl)
 
         model.eval()
-        val_loss = 0.0
-        correct  = 0
-        total    = 0
+        validation_loss = 0.0
         with torch.no_grad():
-            for xb, yb in val_dl:
-                out       = model(xb)
-                val_loss += criterion(out, yb).item()
-                correct  += (out.argmax(1) == yb).sum().item()
-                total    += len(yb)
-        val_loss /= max(len(val_dl), 1)
-        val_acc   = correct / total * 100 if total > 0 else 0
+            for batch_features, batch_labels in val_loader:
+                validation_loss += criterion(model(batch_features), batch_labels).item()
+        validation_loss /= max(1, len(val_loader))
 
-        scheduler.step(val_loss)
-
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            logger.info(
-                f"Epoch {epoch+1:3d} | "
-                f"train={train_loss:.4f} | "
-                f"val={val_loss:.4f} | "
-                f"acc={val_acc:.1f}%"
-            )
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_ctr  = 0
-            best_state    = {k: v.clone() for k, v in model.state_dict().items()}
+        if validation_loss < best_loss - 1e-6:
+            best_loss = validation_loss
+            best_state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+            stale_epochs = 0
         else:
-            patience_ctr += 1
-            if patience_ctr >= clf_cfg["early_stopping_patience"]:
+            stale_epochs += 1
+            if stale_epochs >= patience:
                 logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
 
+    if best_state is None:
+        raise RuntimeError("Training did not produce a valid model state")
     model.load_state_dict(best_state)
-    logger.success(f"Training complete | best val_loss={best_val_loss:.4f}")
-
-    if save_path:
-        save_model(model, save_path, config, val_loss=best_val_loss)
-
+    model.eval()
+    logger.success(f"Training complete; best validation loss={best_loss:.4f}")
+    if save_path is not None:
+        save_model(model, save_path, config, val_loss=best_loss)
     return model
 
 
-# ============================================================
-# Inference
-# ============================================================
-
-def classify_features(
-    model:    SARFeatureMLP,
-    features: np.ndarray,
-) -> dict:
-    """Run inference on extracted feature vectors."""
+def classify_patches(model: SARFeatureMLP, features: np.ndarray, config: dict | None = None) -> dict:
+    del config  # retained for notebook API compatibility
+    array = _validate_features(features)
     model.eval()
-
     with torch.no_grad():
-        logits = model(torch.tensor(features, dtype=torch.float32))
-        probs  = torch.softmax(logits, dim=1).numpy()
-
-    labels      = probs.argmax(axis=1)
-    suspicious  = np.isin(labels, list(SUSPICIOUS_CLASSES))
-    class_names = [CLASS_NAMES[l] for l in labels]
-
-    counts = {CLASS_NAMES[i]: int((labels == i).sum()) for i in range(4)}
-    logger.info(f"Results: {counts} | suspicious: {suspicious.sum()}/{len(features)}")
-
+        probabilities = torch.softmax(model(torch.from_numpy(array)), dim=1).cpu().numpy()
+    labels = probabilities.argmax(axis=1)
+    suspicious = np.isin(labels, tuple(SUSPICIOUS_CLASSES))
     return {
-        "labels":      labels,
-        "probs":       probs,
-        "suspicious":  suspicious,
-        "class_names": class_names
+        "labels": labels,
+        "probs": probabilities,
+        "suspicious": suspicious,
+        "class_names": [CLASS_NAMES[int(label)] for label in labels],
     }
 
 
-# ============================================================
-# Save / load
-# ============================================================
+def extract_grid_features_from_gee(
+    image: ee.Image,
+    grid,
+    config: dict,
+):
+    """Return ``(cell_ids, features)`` using one server-side grid reduction."""
+    from src.ingestion.grid import grid_to_ee_feature_collection
 
-def save_model(model, path, config, val_loss=None):
-    out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "model_state": model.state_dict(),
-        "class_names": CLASS_NAMES,
-        "val_loss":    val_loss,
-        "saved_at":    datetime.utcnow().isoformat(),
-        "config":      config["classifier"]
-    }, out)
-    logger.success(f"Model saved → {out}")
-    return out
+    if grid.empty:
+        return np.empty(0, dtype=np.int64), np.empty((0, N_FEATURES), dtype=np.float32)
+    cfg = config["classifier"]
+    scale = max(int(cfg.get("sampling_scale_m", 100)), int(config["sentinel1"]["resolution_m"]))
+    radius = max(1, int(cfg.get("neighborhood_radius_px", 3)))
+    reduced = _feature_image(image, radius).reduceRegions(
+        collection=grid_to_ee_feature_collection(grid),
+        reducer=ee.Reducer.mean(),
+        scale=scale,
+        tileScale=8,
+    ).getInfo()
+    ids, rows = [], []
+    for feature in reduced.get("features", []):
+        props = feature.get("properties", {})
+        if props.get("cell_id") is None or not all(props.get(name) is not None for name in FEATURE_NAMES):
+            continue
+        ids.append(int(props["cell_id"]))
+        rows.append([float(props[name]) for name in FEATURE_NAMES])
+    return np.asarray(ids, dtype=np.int64), np.asarray(rows, dtype=np.float32).reshape(-1, N_FEATURES)
 
 
-def load_model(path: str) -> SARFeatureMLP:
-    ckpt  = torch.load(path, map_location="cpu")
-    model = SARFeatureMLP(num_classes=len(CLASS_NAMES))
-    model.load_state_dict(ckpt["model_state"])
+def classify_grid_cells(model: SARFeatureMLP, image: ee.Image, grid, config: dict):
+    """Return cell_id/classifier_score pairs suitable for risk fusion."""
+    import pandas as pd
+
+    cell_ids, features = extract_grid_features_from_gee(image, grid, config)
+    if len(features) == 0:
+        return pd.DataFrame({"cell_id": grid["cell_id"], "classifier_score": 0.0})
+    probabilities = classify_patches(model, features)["probs"]
+    scores = probabilities[:, 1:].max(axis=1)
+    return pd.DataFrame({"cell_id": cell_ids, "classifier_score": scores})
+
+def _resolve_model_path(path: str | Path) -> Path:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return candidate
+    return PROJECT_ROOT / candidate
+
+
+def save_model(
+    model: SARFeatureMLP,
+    path: str | Path,
+    config: dict,
+    val_loss: float | None = None,
+) -> Path:
+    output = _resolve_model_path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "n_features": model.n_features,
+            "feature_names": FEATURE_NAMES,
+            "class_names": CLASS_NAMES,
+            "val_loss": val_loss,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "classifier_config": config["classifier"],
+        },
+        output,
+    )
+    logger.success(f"Model saved -> {output}")
+    return output
+
+
+def load_model(path: str | Path) -> SARFeatureMLP:
+    model_path = _resolve_model_path(path)
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+    model = SARFeatureMLP(num_classes=len(CLASS_NAMES), n_features=int(checkpoint.get("n_features", N_FEATURES)))
+    model.load_state_dict(checkpoint["model_state"])
     model.eval()
-    logger.success(f"Model loaded ← {path}")
+    logger.success(f"Model loaded from {model_path}")
     return model
+
+
+__all__ = [
+    "CLASS_NAMES", "FEATURE_NAMES", "N_FEATURES", "SARFeatureMLP", "SARPatchCNN",
+    "extract_patches_from_gee", "generate_pseudo_labels", "train_classifier",
+    "classify_patches", "extract_grid_features_from_gee", "classify_grid_cells",
+    "save_model", "load_model", "load_config",
+]

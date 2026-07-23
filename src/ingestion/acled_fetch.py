@@ -10,19 +10,11 @@ import pandas as pd
 import geopandas as gpd
 from pathlib import Path
 from loguru import logger
-import yaml
 from dotenv import load_dotenv
+from src.config import load_config, resolve_path
 
 load_dotenv()
 
-
-# ============================================================
-# Load config
-# ============================================================
-
-def load_config(config_path: str = "configs/config.yaml") -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
 
 
 # ============================================================
@@ -89,56 +81,59 @@ def refresh_acled_token(refresh_token: str) -> str:
 # ============================================================
 
 def fetch_acled(
-    config:     dict,
+    config: dict,
     start_year: int = 2019,
-    end_year:   int = 2025,
-    limit:      int = 5000
+    end_year: int = 2025,
+    limit: int = 5000,
+    max_pages: int | None = None,
 ) -> pd.DataFrame:
-    """
-    Fetch Nigeria incident data from the ACLED API using OAuth.
-    Returns a DataFrame of all incidents.
-    """
-    token       = get_acled_token()
-    acled_cfg   = config["acled"]
-    event_types = "|".join(acled_cfg["event_types"])
+    """Fetch all matching ACLED incidents using documented pagination."""
+    if start_year > end_year:
+        raise ValueError("start_year must be <= end_year")
+    if not 1 <= limit <= 5000:
+        raise ValueError("limit must be between 1 and 5000")
 
+    token = get_acled_token()
+    acled_cfg = config["acled"]
     headers = {"Authorization": f"Bearer {token}"}
-
-    params = {
-        "country":    acled_cfg["country"],
-        "event_type": event_types,
-        "year":       f"{start_year}|{end_year}",
-        "fields":     "event_date|event_type|sub_event_type|actor1|"
-                      "location|latitude|longitude|fatalities|notes",
-        "limit":      limit,
+    base_params = {
+        "country": acled_cfg["country"],
+        "event_type": "|".join(acled_cfg["event_types"]),
+        "year": f"{start_year}|{end_year}",
+        "year_where": "BETWEEN",
+        "fields": "event_date|event_type|sub_event_type|actor1|location|latitude|longitude|fatalities|notes",
+        "limit": limit,
     }
 
+    records = []
+    page = 1
     logger.info(f"Fetching ACLED data for Nigeria ({start_year}-{end_year})...")
-
-    response = requests.get(
-        "https://acleddata.com/api/acled/read",
-        headers=headers,
-        params=params,
-        timeout=30
-    )
-    response.raise_for_status()
-
-    records = response.json().get("data", [])
+    while max_pages is None or page <= max_pages:
+        response = requests.get(
+            "https://acleddata.com/api/acled/read",
+            headers=headers,
+            params={**base_params, "page": page},
+            timeout=60,
+        )
+        response.raise_for_status()
+        page_records = response.json().get("data", [])
+        records.extend(page_records)
+        if len(page_records) < limit:
+            break
+        page += 1
 
     if not records:
         logger.warning("ACLED returned 0 records. Check filters or credentials.")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["event_date", "event_type", "actor1", "location", "latitude", "longitude", "fatalities"])
 
-    df = pd.DataFrame(records)
-    df["event_date"] = pd.to_datetime(df["event_date"])
-    df["latitude"]   = pd.to_numeric(df["latitude"],   errors="coerce")
-    df["longitude"]  = pd.to_numeric(df["longitude"],  errors="coerce")
+    df = pd.DataFrame.from_records(records).drop_duplicates()
+    df["event_date"] = pd.to_datetime(df["event_date"], errors="coerce")
+    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
     df["fatalities"] = pd.to_numeric(df["fatalities"], errors="coerce").fillna(0)
-    df = df.dropna(subset=["latitude", "longitude"])
-
-    logger.success(f"Fetched {len(df):,} ACLED incidents")
+    df = df.dropna(subset=["event_date", "latitude", "longitude"]).reset_index(drop=True)
+    logger.success(f"Fetched {len(df):,} ACLED incidents across {page} page(s)")
     return df
-
 
 # ============================================================
 # Filter to AOI
@@ -184,6 +179,13 @@ def tag_incidents_to_grid(
     config:    dict
 ) -> gpd.GeoDataFrame:
     """Spatial join incidents to grid cells + compute per-cell scores."""
+    if incidents.empty:
+        result = grid.copy()
+        result["incident_count"] = 0
+        result["recent_incidents"] = 0
+        result["total_fatalities"] = 0
+        result["acled_score"] = 0.0
+        return result
     joined = gpd.sjoin(
         incidents,
         grid[["cell_id", "lat", "lon", "zone", "geometry"]],
@@ -245,6 +247,11 @@ def compute_proximity_scores(
     config:    dict
 ) -> gpd.GeoDataFrame:
     """Score cells by proximity to nearest historical incident."""
+    if incidents.empty:
+        result = grid.copy()
+        if "acled_score" not in result:
+            result["acled_score"] = 0.0
+        return result
     from scipy.spatial import cKDTree
     import numpy as np
 
@@ -275,7 +282,7 @@ def compute_proximity_scores(
 # ============================================================
 
 def save_acled(df: pd.DataFrame, config: dict) -> Path:
-    out_path = Path(config["paths"]["acled"]) / "acled_nigeria.parquet"
+    out_path = resolve_path(config, "acled", create=True) / "acled_nigeria.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out_path, index=False)
     logger.success(f"ACLED data saved -> {out_path}")
@@ -283,7 +290,7 @@ def save_acled(df: pd.DataFrame, config: dict) -> Path:
 
 
 def load_acled(config: dict) -> pd.DataFrame:
-    path = Path(config["paths"]["acled"]) / "acled_nigeria.parquet"
+    path = resolve_path(config, "acled") / "acled_nigeria.parquet"
     if not path.exists():
         raise FileNotFoundError(
             f"ACLED data not found at {path}. Run fetch_acled() first."

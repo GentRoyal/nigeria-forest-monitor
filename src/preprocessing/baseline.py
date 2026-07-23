@@ -9,11 +9,11 @@
 # ============================================================
 
 import ee
-import yaml
 import json
 from pathlib import Path
 from loguru import logger
 from datetime import datetime
+from src.config import load_config, resolve_path
 
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
@@ -35,16 +35,16 @@ def build_baseline(
 
     Steps:
       1. Pull all Sentinel-1 images in the baseline window
-      2. Apply speckle filter to each image
-      3. Take the median across all images → stable reference
+      2. Take the temporal median → stable reference
+      3. Apply one spatial speckle filter to the composite
       4. Clip to AOI
 
     The median is more robust than the mean — it ignores
     temporary anomalies (floods, agriculture cycles, fires)
     that happened during the baseline period.
     """
-    from src.ingestion.gee_download import get_s1_collection
-    from src.preprocessing.speckle_filter import apply_filter_to_collection
+    from src.ingestion.gee_download import get_s1_collection, median_composite
+    from src.preprocessing.speckle_filter import filter_composite
 
     s1_cfg = config["sentinel1"]
 
@@ -69,11 +69,10 @@ def build_baseline(
         )
     logger.info(f"Baseline collection: {count} images")
 
-    # 2. Apply speckle filter to every image
-    filtered = apply_filter_to_collection(collection, method=filter_method)
-
-    # 3. Median composite → robust against outliers
-    baseline = filtered.median().clip(aoi)
+    # Temporal median first, then one spatial filter keeps the graph bounded.
+    baseline = filter_composite(
+        median_composite(collection, aoi), method=filter_method
+    )
 
     logger.success(
         f"Baseline mosaic built from {count} images | "
@@ -99,8 +98,8 @@ def build_monthly_baselines(
     Returns: dict of {month_int: ee.Image}
     e.g. {1: ee.Image, 2: ee.Image, ..., 12: ee.Image}
     """
-    from src.ingestion.gee_download import get_s1_collection
-    from src.preprocessing.speckle_filter import apply_filter_to_collection
+    from src.ingestion.gee_download import get_s1_collection, median_composite
+    from src.preprocessing.speckle_filter import filter_composite
 
     s1_cfg = config["sentinel1"]
 
@@ -112,19 +111,19 @@ def build_monthly_baselines(
         s1_cfg["baseline_end"],
         config
     )
-    filtered = apply_filter_to_collection(collection, method=filter_method)
-
     monthly_baselines = {}
 
     for month in range(1, 13):
-        monthly = filtered.filter(ee.Filter.calendarRange(month, month, "month"))
+        monthly = collection.filter(ee.Filter.calendarRange(month, month, "month"))
         count   = monthly.size().getInfo()
 
         if count == 0:
             logger.warning(f"No images for month {month:02d} — skipping")
             continue
 
-        baseline = monthly.median().clip(aoi)
+        baseline = filter_composite(
+            median_composite(monthly, aoi), method=filter_method
+        )
         monthly_baselines[month] = baseline
         logger.info(f"Month {month:02d}: baseline from {count} images")
 
@@ -248,7 +247,7 @@ def save_baseline_meta(
     the baseline was built (reproducibility).
     """
     s1_cfg   = config["sentinel1"]
-    out_dir  = Path(config["paths"]["processed_sar"])
+    out_dir  = resolve_path(config, "processed_sar", create=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "baseline_meta.json"
 
@@ -290,8 +289,8 @@ if __name__ == "__main__":
     baseline = build_baseline(aoi, config, filter_method="lee")
 
     # Print stats
-    from src.ingestion.gee_download import get_s1_collection
-    from src.preprocessing.speckle_filter import apply_filter_to_collection
+    from src.ingestion.gee_download import get_s1_collection, median_composite
+    from src.preprocessing.speckle_filter import filter_composite
 
     s1_cfg     = config["sentinel1"]
     collection = get_s1_collection(

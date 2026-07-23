@@ -5,13 +5,13 @@
 
 import ee
 import geemap
-import yaml
 import os
 from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from loguru import logger
 from dotenv import load_dotenv
+from src.config import load_config
 
 load_dotenv()
 
@@ -21,31 +21,21 @@ load_dotenv()
 # ============================================================
 
 def init_gee() -> None:
-    """Authenticate and initialise Google Earth Engine."""
+    """Initialise Earth Engine without triggering hidden interactive auth."""
     project = os.getenv("GEE_PROJECT")
     if not project:
         raise EnvironmentError(
-            "GEE_PROJECT not set. Add it to your .env file.\n"
-            "Example: GEE_PROJECT=ee-yourname-nigeria-monitor"
+            "GEE_PROJECT is not set. Add it to the project .env file."
         )
     try:
         ee.Initialize(project=project)
-        logger.success(f"GEE initialised — project: {project}")
-    except Exception:
-        logger.warning("GEE credentials not found. Running authentication...")
-        ee.Authenticate()
-        ee.Initialize(project=project)
-        logger.success("GEE authenticated and initialised.")
-
-
-# ============================================================
-# Load config
-# ============================================================
-
-def load_config(config_path: str = "configs/config.yaml") -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
+    except Exception as error:
+        raise RuntimeError(
+            "Google Earth Engine could not initialise. Run `earthengine authenticate` "
+            "once from the project .venv, verify GEE_PROJECT, then retry. "
+            f"Original error: {error}"
+        ) from error
+    logger.success(f"GEE initialised — project: {project}")
 
 # ============================================================
 # Build Area of Interest
@@ -100,6 +90,11 @@ def get_s1_collection(
     return collection
 
 
+def median_composite(collection: ee.ImageCollection, aoi: ee.Geometry) -> ee.Image:
+    """Build a median composite while retaining a native source projection."""
+    projection = ee.Image(collection.first()).select(0).projection()
+    return collection.median().setDefaultProjection(projection).clip(aoi)
+
 # ============================================================
 # Build monthly composites
 # ============================================================
@@ -131,7 +126,7 @@ def build_monthly_composites(
             current += relativedelta(months=1)
             continue
 
-        composite = monthly.median().clip(aoi)
+        composite = median_composite(monthly, aoi)
         composites.append({
             "year":  current.year,
             "month": current.month,
@@ -224,7 +219,7 @@ def build_baseline_mosaic(
         s1_cfg["baseline_end"],
         config
     )
-    mosaic = collection.median().clip(aoi)
+    mosaic = median_composite(collection, aoi)
     count  = collection.size().getInfo()
     logger.success(
         f"Baseline mosaic built from {count} images | "
