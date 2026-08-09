@@ -103,10 +103,15 @@ reading the long-lived refresh token.
 | GET | /api/v1/invitations/{token}/summary | Safe invitation summary | Valid invitation |
 | POST | /api/v1/invitations/{token}/accept | Create invited account | Valid invitation |
 
-These eight authentication/profile endpoints are implemented. Invitation
-creation/revocation remains in the organisation-administration batch. Until
-email delivery is connected, only the local environment returns a development
-password-reset token; non-local responses remain generic.
+The eight Slice 4.1 authentication/profile endpoints are implemented. The
+self-service `PATCH /me`, session listing, and single-session revocation
+endpoints from Slice 4.2 are also implemented, along with organisation
+read/update, department administration, and team administration. Logout-all,
+member directory/updates, and team membership assignment are also implemented.
+Logout-all and invitation creation/revocation remain in later
+organisation-administration batches. Until email delivery is connected, only
+the local environment returns a development password-reset token; non-local
+responses remain generic.
 
 Login request:
 

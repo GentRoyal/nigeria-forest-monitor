@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +13,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     access_token_secret: str = "local-development-signing-key-change-me"
     access_token_minutes: int = 15
+    jwt_leeway_seconds: int = Field(default=30, ge=0, le=300)
     refresh_token_days: int = 14
     invitation_hours: int = 72
     password_reset_minutes: int = 30

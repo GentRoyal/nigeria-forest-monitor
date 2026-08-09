@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 
+from ...db import tenant_connection
 from ...schemas.auth import (
     AccessTokenData,
     AccessTokenResponse,
@@ -23,10 +24,15 @@ from ...schemas.auth import (
     PasswordResetRequestResponse,
     ProfileData,
     ProfileResponse,
+    ProfileUpdateRequest,
     RefreshRequest,
     ResponseMeta,
+    SessionData,
+    SessionListData,
+    SessionListResponse,
     TeamSummary,
 )
+from ...security.audit import record_audit
 from ...security.auth import AuthError, AuthService, TokenPair
 from ...security.tokens import new_opaque_token
 from ...settings import get_settings
@@ -344,3 +350,135 @@ async def me(
         ),
         meta=_meta(request),
     )
+
+
+@router.patch("/me", response_model=ProfileResponse, tags=["profile"])
+async def update_me(
+    payload: ProfileUpdateRequest,
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> ProfileResponse:
+    display_name = payload.display_name or principal.display_name
+    timezone = payload.timezone or principal.timezone
+    before = {
+        "display_name": principal.display_name,
+        "timezone": principal.timezone,
+    }
+    after = {"display_name": display_name, "timezone": timezone}
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        await connection.execute(
+            """
+            UPDATE user_profiles
+            SET display_name=%s,timezone=%s,updated_at=now()
+            WHERE id=%s
+            """,
+            (display_name, timezone, principal.user_id),
+        )
+        if before != after:
+            await record_audit(
+                connection,
+                organisation_id=principal.organisation_id,
+                actor_id=principal.user_id,
+                action="identity.profile_updated",
+                target_type="user_profile",
+                target_id=principal.user_id,
+                before=before,
+                after=after,
+                ip_address=_client_ip(request),
+            )
+    return ProfileResponse(
+        data=ProfileData(
+            id=principal.user_id,
+            organisation_id=principal.organisation_id,
+            email=principal.email,
+            display_name=display_name,
+            role=principal.role,
+            status=principal.status,
+            timezone=timezone,
+            department_id=principal.department_id,
+            department_name=principal.department_name,
+            teams=[TeamSummary.model_validate(team) for team in principal.teams],
+        ),
+        meta=_meta(request),
+    )
+
+
+@router.get("/me/sessions", response_model=SessionListResponse, tags=["profile"])
+async def list_my_sessions(
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> SessionListResponse:
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        sessions = await (
+            await connection.execute(
+                """
+                SELECT id,user_agent,ip_address::text,created_at,last_activity_at,expires_at
+                FROM auth_sessions
+                WHERE user_id=%s AND revoked_at IS NULL AND expires_at>now()
+                ORDER BY last_activity_at DESC,id
+                """,
+                (principal.user_id,),
+            )
+        ).fetchall()
+    return SessionListResponse(
+        data=SessionListData(
+            items=[
+                SessionData(
+                    **session,
+                    current=session["id"] == principal.session_id,
+                )
+                for session in sessions
+            ]
+        ),
+        meta=_meta(request),
+    )
+
+
+@router.delete(
+    "/me/sessions/{session_id}",
+    response_model=EmptyResponse,
+    tags=["profile"],
+)
+async def revoke_my_session(
+    request: Request,
+    session_id: UUID,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> EmptyResponse:
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        session = await (
+            await connection.execute(
+                """
+                SELECT id,revoked_at FROM auth_sessions
+                WHERE id=%s AND user_id=%s
+                FOR UPDATE
+                """,
+                (session_id, principal.user_id),
+            )
+        ).fetchone()
+        if not session:
+            raise ApiError(
+                404,
+                "session_not_found",
+                "Session not found",
+                "The requested session does not exist.",
+            )
+        if session["revoked_at"] is None:
+            await connection.execute(
+                """
+                UPDATE auth_sessions
+                SET revoked_at=now(),revoke_reason='revoked by user'
+                WHERE id=%s
+                """,
+                (session_id,),
+            )
+            await record_audit(
+                connection,
+                organisation_id=principal.organisation_id,
+                actor_id=principal.user_id,
+                action="authentication.session_revoked",
+                target_type="auth_session",
+                target_id=session_id,
+                reason="revoked by user",
+                ip_address=_client_ip(request),
+            )
+    return EmptyResponse(data=EmptyData(), meta=_meta(request))

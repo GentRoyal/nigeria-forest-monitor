@@ -47,10 +47,12 @@ def issue_access_token(
 
 
 def decode_access_token(token: str) -> dict[str, object]:
+    settings = get_settings()
     return jwt.decode(
         token,
-        get_settings().access_token_secret,
+        settings.access_token_secret,
         algorithms=["HS256"],
         audience="nfm-api",
         issuer="nigeria-forest-monitor",
+        leeway=timedelta(seconds=settings.jwt_leeway_seconds),
     )

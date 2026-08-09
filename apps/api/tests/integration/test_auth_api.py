@@ -135,3 +135,65 @@ def test_missing_bearer_and_invalid_request_id_are_handled() -> None:
         assert response.status_code == 401
         assert response.json()["code"] == "authentication_required"
         assert response.headers["X-Request-ID"] != "not-a-uuid"
+
+
+def test_profile_update_and_session_management() -> None:
+    with TestClient(app) as client:
+        first_login = login(client)
+        second_login = login(client)
+        first_access = first_login.json()["data"]["access_token"]
+        second_access = second_login.json()["data"]["access_token"]
+        second_session_id = second_login.json()["data"]["session_id"]
+
+        updated = client.patch(
+            "/api/v1/me",
+            headers={"Authorization": f"Bearer {first_access}"},
+            json={"display_name": "Local Forest Owner", "timezone": "Africa/Lagos"},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["data"]["display_name"] == "Local Forest Owner"
+
+        sessions = client.get(
+            "/api/v1/me/sessions",
+            headers={"Authorization": f"Bearer {first_access}"},
+        )
+        assert sessions.status_code == 200
+        items = sessions.json()["data"]["items"]
+        assert len(items) >= 2
+        assert sum(item["current"] for item in items) == 1
+        assert all("refresh_token_hash" not in item for item in items)
+
+        revoked = client.delete(
+            f"/api/v1/me/sessions/{second_session_id}",
+            headers={"Authorization": f"Bearer {first_access}"},
+        )
+        assert revoked.status_code == 200
+
+        rejected = client.get(
+            "/api/v1/me",
+            headers={"Authorization": f"Bearer {second_access}"},
+        )
+        assert rejected.status_code == 401
+        assert rejected.json()["code"] == "session_expired"
+
+
+def test_profile_update_validates_payload_and_session_ownership() -> None:
+    with TestClient(app) as client:
+        access = login(client).json()["data"]["access_token"]
+        headers = {"Authorization": f"Bearer {access}"}
+
+        empty_update = client.patch("/api/v1/me", headers=headers, json={})
+        invalid_timezone = client.patch(
+            "/api/v1/me",
+            headers=headers,
+            json={"timezone": "not/a-real-timezone"},
+        )
+        missing_session = client.delete(
+            "/api/v1/me/sessions/00000000-0000-0000-0000-000000000000",
+            headers=headers,
+        )
+
+        assert empty_update.status_code == 422
+        assert invalid_timezone.status_code == 422
+        assert missing_session.status_code == 404
+        assert missing_session.json()["code"] == "session_not_found"

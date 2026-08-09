@@ -1,7 +1,8 @@
 from datetime import datetime
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..security.passwords import validate_password
 
@@ -67,6 +68,60 @@ class ProfileData(BaseModel):
 
 class ProfileResponse(BaseModel):
     data: ProfileData
+    meta: ResponseMeta
+
+
+class ProfileUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=2, max_length=160)
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("display_name")
+    @classmethod
+    def normalise_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalised = " ".join(value.split())
+        if len(normalised) < 2:
+            raise ValueError("display_name must contain at least two visible characters")
+        return normalised
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalised = value.strip()
+        try:
+            ZoneInfo(normalised)
+        except (ZoneInfoNotFoundError, ValueError) as error:
+            raise ValueError("timezone must be a valid IANA timezone") from error
+        return normalised
+
+    @model_validator(mode="after")
+    def require_change(self) -> "ProfileUpdateRequest":
+        if self.display_name is None and self.timezone is None:
+            raise ValueError("at least one profile field is required")
+        return self
+
+
+class SessionData(BaseModel):
+    id: UUID
+    user_agent: str | None
+    ip_address: str | None
+    created_at: datetime
+    last_activity_at: datetime
+    expires_at: datetime
+    current: bool
+
+
+class SessionListData(BaseModel):
+    items: list[SessionData]
+
+
+class SessionListResponse(BaseModel):
+    data: SessionListData
     meta: ResponseMeta
 
 
