@@ -23,16 +23,15 @@ the platform, workflow, provenance, and operational reliability are the core.
 ```text
 Users / organisations / analysts
               |
-    Next.js + MapLibre (Vercel)
+       Next.js + MapLibre
               |
-       FastAPI platform API (Render)
+       FastAPI platform API
        /       |          |       \
-Supabase   job queue   TiTiler   notifications/webhooks
-Auth +       |           |               |
-PostGIS      |      R2 object storage     |
-             v      COG + STAC assets     |
-      local Docker worker <---------------+
-      (managed cloud workers when justified)
+PostgreSQL  Airflow    TiTiler   notifications
++ PostGIS     |           |             |
++ local auth  |      local COG storage  |
+              v      + STAC metadata    |
+       local Docker processing <--------+
 ```
 
 Version 1 lets an organisation invite users, register monitored sites, define a
@@ -70,78 +69,89 @@ Status: `[x]` completed, `[ ]` pending, and **Current** is the active phase.
 
 **Done when:** The pipeline works outside the notebook and offline tests pass.
 
-## Phase 1 — Product contract and architecture **Current**
+## Phase 1 — Product contract and architecture **Complete**
 
-- [ ] Write MVP personas, user journeys, user stories, and explicit non-goals.
-- [ ] Define the primary journey: onboard organisation → create site → schedule
+- [x] Write MVP personas, user journeys, user stories, and explicit non-goals.
+- [x] Define the primary journey: onboard organisation → create site → schedule
   monitoring → discover imagery → process → review event → notify/export.
-- [ ] Define roles and permissions for owner, administrator, analyst, and viewer.
-- [ ] Define users, organisations, sites, grid cells, observations, raster
+- [x] Define roles and permissions for administrator, analyst, authorised
+  verification officer, executive viewer, and platform operator.
+- [x] Define users, organisations, departments, teams, sites, grid cells,
+  observations, raster
   assets, schedules, jobs, change events, assignments, reviews, subscriptions,
   notifications, exports, API keys, and audit records.
-- [ ] Define lifecycles for jobs, observations, events, reviews, and alerts.
-- [ ] Define boundaries between the frontend, API, tile service, and worker.
-- [ ] Record decisions for Supabase, Render, Vercel, and R2.
-- [ ] Specify tenancy, security, privacy, retention, attribution, and responsible-
+- [x] Define lifecycles for schedules, jobs, observations, events, assignments,
+  reviews, and notifications.
+- [x] Define boundaries between the frontend, API, Airflow orchestrator, tile
+  service, local raster storage, and PostgreSQL/PostGIS.
+- [x] Record the local-first architecture and explicitly defer Supabase, Render,
+  Vercel, and R2 until deployment requirements and measured usage justify them.
+- [x] Specify tenancy, security, privacy, retention, attribution, and responsible-
   use requirements.
-- [ ] Set measurable budgets for processing latency, map/API performance, data
-  freshness, availability, accessibility, failures, and operating cost.
-- [ ] Define an MVP demo scenario and representative seed dataset.
+- [x] Set measurable budgets for processing latency, map/API performance, data
+  freshness, availability, accessibility, and failures; explicitly defer the
+  monthly operating-cost cap for later approval.
+- [x] Define an MVP demo scenario and representative seed dataset.
 
 **Done when:** `docs/product-spec.md`, `docs/data-model.md`, and an architecture
 decision record describe the complete version-1 journey, permission model,
 service targets, and non-goals without depending on a particular detector.
 
-## Phase 2 — Production repository structure
+## Phase 2 — Production repository structure **Complete**
 
-- [ ] Convert the repository to a monorepo without breaking the analytical core.
-- [ ] Create `apps/web` for Next.js and MapLibre.
-- [ ] Create `apps/api` for FastAPI.
-- [ ] Create `apps/worker` for local/cloud processing.
-- [ ] Move reusable geospatial logic into `packages/forest_monitor`.
-- [ ] Add shared development commands and environment templates.
-- [ ] Add Dockerfiles and a local Docker Compose stack.
-- [ ] Add formatting, linting, type checking, and pre-commit hooks.
-- [ ] Add unit, integration, contract, browser, and geospatial fixture test lanes.
-- [ ] Add architecture decision record and runbook templates.
+- [x] Convert the repository to a monorepo without breaking the analytical core.
+- [x] Create `apps/web` for Next.js and MapLibre.
+- [x] Create `apps/api` for FastAPI.
+- [x] Create `apps/orchestrator` for Airflow-based local batch orchestration.
+- [x] Create `apps/tiles` for restricted local COG tile access.
+- [x] Move reusable geospatial logic into `packages/forest_monitor`.
+- [x] Add shared development commands and environment templates.
+- [x] Add Dockerfiles and a validated local Docker Compose stack.
+- [x] Add formatting, linting, type checking, and pre-commit hooks.
+- [x] Add analytical regression, API, tile-security, and frontend build test lanes;
+  retain contract, browser, and realistic geospatial fixtures in their feature phases.
+- [x] Add architecture decision records and a runbook template.
+- [x] Build all images and smoke-test the complete running stack, including an
+  executed Airflow DAG.
 
 **Done when:** One command starts local services and the worker, and existing
 analytical tests still pass.
 
-## Phase 3 — Supabase, PostGIS, and security
+## Phase 3 — PostgreSQL/PostGIS, local authentication, and security **Complete**
 
-- [ ] Create local and hosted Supabase projects.
-- [ ] Enable PostGIS and add version-controlled migrations.
-- [ ] Create organisation, membership, site, grid-cell, observation, asset,
+- [x] Create the local PostgreSQL/PostGIS application database and migration toolchain.
+- [x] Keep Airflow metadata isolated from the product database.
+- [x] Create organisation, membership, site, grid-cell, observation, asset,
   schedule, job, event, assignment, review, subscription, notification, export,
   API-key, and audit-event tables.
-- [ ] Add spatial, temporal, status, and foreign-key indexes.
-- [ ] Define geometry types, coordinate systems, precision, and validity rules.
-- [ ] Implement Supabase Auth, invitations, membership lifecycle, and password/
-  session management.
-- [ ] Implement owner, administrator, analyst, and viewer permissions.
-- [ ] Implement organisation-based row-level security for every owned table and
+- [x] Add spatial, temporal, status, and foreign-key indexes.
+- [x] Define geometry types, coordinate systems, precision, and validity rules.
+- [x] Implement PostgreSQL-backed authentication, invitations, membership lifecycle,
+  password hashing, session rotation, and revocation.
+- [x] Implement owner, administrator, analyst, and viewer permissions.
+- [x] Implement organisation-based row-level security for every owned table and
   storage object.
-- [ ] Add immutable audit records for privileged and analyst actions.
-- [ ] Define deletion, retention, anonymisation, backup, and restore behaviour.
-- [ ] Generate realistic seed data.
-- [ ] Add migration, rollback, spatial-query, permission, and RLS tests.
+- [x] Add immutable audit records for privileged and analyst actions.
+- [x] Define deletion, retention, anonymisation, backup, and restore behaviour.
+- [x] Generate realistic seed data.
+- [x] Add migration, rollback, spatial-query, permission, and RLS tests.
 
 **Done when:** Test organisations cannot access each other's data, and spatial
 queries return the correct grid cells for a site or viewport. Role permissions,
 invitations, audit history, and deletion rules are verified automatically.
 
-## Phase 4 — FastAPI backend
+## Phase 4 — FastAPI backend **Current**
 
 - [ ] Add configuration, structured logging, health checks, and API versioning.
-- [ ] Verify Supabase JWTs and organisation membership.
+- [ ] Verify locally issued access tokens and organisation membership.
 - [ ] Implement organisation, membership, invitation, and profile endpoints.
 - [ ] Implement site CRUD, AOI validation, ownership, tags, search, saved filters,
   and grid generation/import.
 - [ ] Implement schedules, observations, events, assignments, reviews, notes,
   evidence, and site timeline endpoints.
 - [ ] Implement job create, claim, heartbeat, complete, retry, and cancel APIs.
-- [ ] Issue signed object upload/download URLs.
+- [ ] Issue controlled local asset upload/download references, preserving an interface
+  that can later support signed object-storage URLs.
 - [ ] Implement notification preferences, subscriptions, exports, API keys, and
   webhook management.
 - [ ] Add administration endpoints for failed jobs, reprocessing, quotas, and
@@ -339,10 +349,10 @@ usefulness with honest, reproducible evidence.
 
 ## Immediate delivery queue
 
-1. [ ] Write the MVP product specification and non-goals.
-2. [ ] Document roles, the end-to-end journey, and release gates.
-3. [ ] Design the PostGIS model and job/event/alert state machines.
-4. [ ] Restructure the repository into the production monorepo.
-5. [ ] Record the hybrid hosting architecture decision.
-6. [ ] Preserve and rerun analytical tests after restructuring.
+1. [x] Write the MVP product specification and non-goals.
+2. [x] Document roles, the end-to-end journey, and release gates.
+3. [x] Design the PostGIS model and job/event/alert state machines.
+4. [x] Restructure the repository into the production monorepo.
+5. [x] Record the local-first architecture and defer hosting providers.
+6. [x] Preserve and rerun analytical tests after restructuring.
 7. [ ] Deliver the internal-alpha vertical slice before broad feature expansion.

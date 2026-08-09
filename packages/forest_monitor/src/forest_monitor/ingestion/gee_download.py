@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from loguru import logger
 from dotenv import load_dotenv
-from src.config import load_config
+from forest_monitor.config import load_config
 
 load_dotenv()
 

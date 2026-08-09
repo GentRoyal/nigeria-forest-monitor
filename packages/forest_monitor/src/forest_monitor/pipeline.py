@@ -7,17 +7,17 @@ from pathlib import Path
 
 from loguru import logger
 
-from src.config import load_config, resolve_path
-from src.dashboard.alert_report import generate_alert_report
-from src.dashboard.map_builder import build_risk_map, save_risk_map
-from src.detection.change_detection import detect_changes, score_grid_cells
-from src.detection.classifier import classify_grid_cells, load_model
-from src.detection.risk_scorer import save_risk_scores, score_risk
-from src.ingestion.acled_fetch import compute_proximity_scores, filter_to_aoi, load_acled, tag_incidents_to_grid
-from src.ingestion.gee_download import build_aoi, get_s1_collection, init_gee, median_composite
-from src.ingestion.grid import create_grid, tag_zones
-from src.preprocessing.baseline import build_baseline
-from src.preprocessing.speckle_filter import filter_composite
+from forest_monitor.config import load_config, resolve_path
+from forest_monitor.dashboard.alert_report import generate_alert_report
+from forest_monitor.dashboard.map_builder import build_risk_map, save_risk_map
+from forest_monitor.detection.change_detection import detect_changes, score_grid_cells
+from forest_monitor.detection.classifier import classify_grid_cells, load_model
+from forest_monitor.detection.risk_scorer import save_risk_scores, score_risk
+from forest_monitor.ingestion.acled_fetch import compute_proximity_scores, filter_to_aoi, load_acled, tag_incidents_to_grid
+from forest_monitor.ingestion.gee_download import build_aoi, get_s1_collection, init_gee, median_composite
+from forest_monitor.ingestion.grid import create_grid, tag_zones
+from forest_monitor.preprocessing.baseline import build_baseline
+from forest_monitor.preprocessing.speckle_filter import filter_composite
 
 
 def run_monitoring(

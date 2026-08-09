@@ -3,9 +3,17 @@ models/
 reports/
 
 .env
+.env.*
+!.env.example
+*.local
 credentials/
+.secrets/
 service_account*.json
 *_key.json
+*.pem
+*.key
+*.p12
+*.pfx
 
 __pycache__/
 *.py[cod]
@@ -35,6 +43,27 @@ Thumbs.db
 
 *.log
 logs/
+airflow-webserver_config.py
+airflow.cfg
+standalone_admin_password.txt
 
+node_modules/
+.next/
+coverage/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+backups/
+*.dump
+*.sql.gz
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+*.tsbuildinfo
+
+*.tif
+*.tiff
 *.tif.aux.xml
 *.ovr

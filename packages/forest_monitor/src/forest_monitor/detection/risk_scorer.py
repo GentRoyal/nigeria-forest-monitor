@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from src.config import load_config, resolve_path
+from forest_monitor.config import load_config, resolve_path
 
 SIGNAL_COLUMNS = {
     "change_detection": "change_score",

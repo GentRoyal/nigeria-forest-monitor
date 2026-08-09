@@ -13,8 +13,8 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from src.config import resolve_path
-from src.detection.risk_scorer import top_alerts
+from forest_monitor.config import resolve_path
+from forest_monitor.detection.risk_scorer import top_alerts
 
 
 def generate_alert_report(

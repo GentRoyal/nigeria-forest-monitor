@@ -19,7 +19,7 @@ import torch.optim as optim
 from loguru import logger
 from torch.utils.data import DataLoader, Dataset
 
-from src.config import PROJECT_ROOT, load_config
+from forest_monitor.config import PROJECT_ROOT, load_config
 
 CLASS_NAMES = {0: "normal_forest", 1: "clearing", 2: "structure", 3: "path_or_track"}
 SUSPICIOUS_CLASSES = {1, 2, 3}
@@ -323,7 +323,7 @@ def extract_grid_features_from_gee(
     config: dict,
 ):
     """Return ``(cell_ids, features)`` using one server-side grid reduction."""
-    from src.ingestion.grid import grid_to_ee_feature_collection
+    from forest_monitor.ingestion.grid import grid_to_ee_feature_collection
 
     if grid.empty:
         return np.empty(0, dtype=np.int64), np.empty((0, N_FEATURES), dtype=np.float32)

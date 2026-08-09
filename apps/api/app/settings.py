@@ -1,0 +1,29 @@
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="NFM_", env_file=".env", extra="ignore")
+
+    environment: str = "local"
+    api_version: str = "0.1.0"
+    database_url: str = "postgresql://forest_monitor:forest_monitor@localhost:5433/forest_monitor"
+    cors_origins: str = "http://localhost:3000"
+    access_token_secret: str = "local-development-signing-key-change-me"
+    access_token_minutes: int = 15
+    refresh_token_days: int = 14
+    invitation_hours: int = 72
+    password_reset_minutes: int = 30
+    password_pepper: str = "local-development-pepper-change-me"
+    seed_admin_email: str = "owner@nfm.local"
+    seed_admin_password: str = "LocalForest!2026"
+
+    @property
+    def allowed_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

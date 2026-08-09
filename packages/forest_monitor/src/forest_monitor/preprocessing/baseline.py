@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from loguru import logger
 from datetime import datetime
-from src.config import load_config, resolve_path
+from forest_monitor.config import load_config, resolve_path
 
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
@@ -43,8 +43,8 @@ def build_baseline(
     temporary anomalies (floods, agriculture cycles, fires)
     that happened during the baseline period.
     """
-    from src.ingestion.gee_download import get_s1_collection, median_composite
-    from src.preprocessing.speckle_filter import filter_composite
+    from forest_monitor.ingestion.gee_download import get_s1_collection, median_composite
+    from forest_monitor.preprocessing.speckle_filter import filter_composite
 
     s1_cfg = config["sentinel1"]
 
@@ -98,8 +98,8 @@ def build_monthly_baselines(
     Returns: dict of {month_int: ee.Image}
     e.g. {1: ee.Image, 2: ee.Image, ..., 12: ee.Image}
     """
-    from src.ingestion.gee_download import get_s1_collection, median_composite
-    from src.preprocessing.speckle_filter import filter_composite
+    from forest_monitor.ingestion.gee_download import get_s1_collection, median_composite
+    from forest_monitor.preprocessing.speckle_filter import filter_composite
 
     s1_cfg = config["sentinel1"]
 
@@ -279,7 +279,7 @@ if __name__ == "__main__":
     sys.path.append(str(Path(__file__).resolve().parents[2]))
 
     import ee
-    from src.ingestion.gee_download import init_gee, build_aoi
+    from forest_monitor.ingestion.gee_download import init_gee, build_aoi
 
     init_gee()
     config = load_config()
@@ -289,8 +289,8 @@ if __name__ == "__main__":
     baseline = build_baseline(aoi, config, filter_method="lee")
 
     # Print stats
-    from src.ingestion.gee_download import get_s1_collection, median_composite
-    from src.preprocessing.speckle_filter import filter_composite
+    from forest_monitor.ingestion.gee_download import get_s1_collection, median_composite
+    from forest_monitor.preprocessing.speckle_filter import filter_composite
 
     s1_cfg     = config["sentinel1"]
     collection = get_s1_collection(

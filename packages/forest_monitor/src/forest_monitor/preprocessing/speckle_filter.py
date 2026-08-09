@@ -6,7 +6,7 @@
 import ee
 from pathlib import Path
 from loguru import logger
-from src.config import load_config
+from forest_monitor.config import load_config
 
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:

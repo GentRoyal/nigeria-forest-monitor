@@ -21,7 +21,7 @@ import numpy as np
 from pathlib import Path
 from loguru import logger
 from datetime import datetime
-from src.config import load_config, resolve_path
+from forest_monitor.config import load_config, resolve_path
 
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
@@ -306,7 +306,7 @@ def score_grid_cells(
 ) -> "gpd.GeoDataFrame":
     """Compute cell scores with one server-side reduceRegions request."""
     import pandas as pd
-    from src.ingestion.grid import grid_to_ee_feature_collection
+    from forest_monitor.ingestion.grid import grid_to_ee_feature_collection
 
     if grid.empty:
         result = grid.copy()
@@ -422,11 +422,11 @@ if __name__ == "__main__":
     sys.path.append(str(Path(__file__).resolve().parents[2]))
 
     import ee
-    from src.ingestion.gee_download import (
+    from forest_monitor.ingestion.gee_download import (
         init_gee, build_aoi, get_s1_collection
     )
-    from src.preprocessing.baseline  import build_baseline
-    from src.preprocessing.speckle_filter import filter_composite
+    from forest_monitor.preprocessing.baseline  import build_baseline
+    from forest_monitor.preprocessing.speckle_filter import filter_composite
 
     init_gee()
     config = load_config()

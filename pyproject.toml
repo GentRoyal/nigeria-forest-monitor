@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nigeria-forest-monitor"
+version = "0.2.0"
+description = "Shared geospatial analysis package for Nigeria Forest Monitor"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "geopandas>=0.14,<2",
+  "loguru>=0.7,<1",
+  "numpy>=1.26,<3",
+  "pandas>=2.2,<3",
+  "pyproj>=3.7.2,<4",
+  "PyYAML>=6,<7",
+  "shapely>=2,<3",
+]
+
+[project.optional-dependencies]
+earth-engine = ["earthengine-api>=0.1.390", "geemap>=0.32"]
+ml = ["scikit-learn>=1.5", "torch>=2.3"]
+reporting = ["folium>=0.16", "Pillow>=10.3", "reportlab>=4.2"]
+dev = [
+  "mypy>=1.10",
+  "pre-commit>=3.7",
+  "pytest>=8.2",
+  "pytest-cov>=5",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+forest-monitor = "forest_monitor.pipeline:main"
+
+[tool.setuptools.packages.find]
+where = ["packages/forest_monitor/src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["packages/forest_monitor/tests", "apps/api/tests", "apps/tiles/tests"]
+markers = [
+  "integration: requires the local PostgreSQL/PostGIS service",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true

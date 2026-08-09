@@ -9,7 +9,7 @@ import geopandas as gpd
 from folium.features import GeoJsonTooltip
 from loguru import logger
 
-from src.config import load_config, resolve_path
+from forest_monitor.config import load_config, resolve_path
 
 RISK_COLORS = {
     "low": "#2ca25f",

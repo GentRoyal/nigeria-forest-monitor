@@ -6,12 +6,10 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
-from shapely.geometry import box
-
-from src.config import PROJECT_ROOT, load_config, resolve_path
-from src.dashboard.alert_report import generate_alert_report
-from src.dashboard.map_builder import build_risk_map
-from src.detection.classifier import (
+from forest_monitor.config import PROJECT_ROOT, load_config, resolve_path
+from forest_monitor.dashboard.alert_report import generate_alert_report
+from forest_monitor.dashboard.map_builder import build_risk_map
+from forest_monitor.detection.classifier import (
     N_FEATURES,
     classify_patches,
     generate_pseudo_labels,
@@ -19,9 +17,10 @@ from src.detection.classifier import (
     save_model,
     train_classifier,
 )
-from src.detection.risk_scorer import score_risk, top_alerts
-from src.ingestion.grid import create_grid, tag_zones
-from src.preprocessing.normalise import apply_standardiser, fit_standardiser
+from forest_monitor.detection.risk_scorer import score_risk, top_alerts
+from forest_monitor.ingestion.grid import create_grid, tag_zones
+from forest_monitor.preprocessing.normalise import apply_standardiser, fit_standardiser
+from shapely.geometry import box
 
 
 class ConfigAndGridTests(unittest.TestCase):
@@ -50,7 +49,9 @@ class FeatureClassifierTests(unittest.TestCase):
     def setUp(self):
         self.config = load_config()
         self.config["classifier"] = dict(self.config["classifier"])
-        self.config["classifier"].update({"epochs": 3, "early_stopping_patience": 2, "batch_size": 8})
+        self.config["classifier"].update(
+            {"epochs": 3, "early_stopping_patience": 2, "batch_size": 8}
+        )
         rng = np.random.default_rng(42)
         self.features = rng.normal(size=(48, N_FEATURES)).astype(np.float32)
         self.labels = generate_pseudo_labels(self.features)

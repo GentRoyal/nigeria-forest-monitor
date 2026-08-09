@@ -1,0 +1,115 @@
+name: nigeria-forest-monitor
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${NFM_POSTGRES_SUPERUSER_PASSWORD:-postgres-local-only}
+      POSTGRES_DB: postgres
+    ports:
+      - "${NFM_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres-init:
+    image: postgres:16
+    environment:
+      PGPASSWORD: ${NFM_POSTGRES_SUPERUSER_PASSWORD:-postgres-local-only}
+    command:
+      - sh
+      - -c
+      - "tr -d '\\015' < /opt/nfm/ensure-databases.sh > /tmp/ensure-databases.sh && sh /tmp/ensure-databases.sh"
+    volumes:
+      - ./infra/postgres/ensure-databases.sh:/opt/nfm/ensure-databases.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      NFM_ENVIRONMENT: local
+      NFM_DATABASE_URL: postgresql://forest_monitor:forest_monitor@postgres:5432/forest_monitor
+      NFM_CORS_ORIGINS: http://localhost:3000
+      NFM_SEED_ADMIN_EMAIL: ${NFM_SEED_ADMIN_EMAIL:-owner@nfm.local}
+      NFM_SEED_ADMIN_PASSWORD: ${NFM_SEED_ADMIN_PASSWORD:-LocalForest!2026}
+      NFM_ACCESS_TOKEN_SECRET: ${NFM_ACCESS_TOKEN_SECRET:-local-development-signing-key-change-me}
+      NFM_PASSWORD_PEPPER: ${NFM_PASSWORD_PEPPER:-local-development-pepper-change-me}
+    ports:
+      - "${NFM_API_PORT:-8000}:8000"
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  tiles:
+    build:
+      context: .
+      dockerfile: apps/tiles/Dockerfile
+    environment:
+      NFM_RASTER_ROOT: /data/rasters
+    ports:
+      - "${NFM_TILES_PORT:-8001}:8001"
+    volumes:
+      - ./data/rasters:/data/rasters:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  airflow:
+    build:
+      context: .
+      dockerfile: apps/orchestrator/Dockerfile
+    command: standalone
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      FOREST_MONITOR_ROOT: /workspace
+    ports:
+      - "${NFM_AIRFLOW_PORT:-8080}:8080"
+    volumes:
+      - ./apps/orchestrator/dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
+      - ./configs:/workspace/configs:ro
+      - ./ROADMAP.md:/workspace/ROADMAP.md:ro
+      - ./data:/workspace/data
+      - ./models:/workspace/models
+      - ./reports:/workspace/reports
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:${NFM_API_PORT:-8000}
+      NEXT_PUBLIC_TILE_URL: http://localhost:${NFM_TILES_PORT:-8001}
+    ports:
+      - "${NFM_WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+      tiles:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  airflow_logs:

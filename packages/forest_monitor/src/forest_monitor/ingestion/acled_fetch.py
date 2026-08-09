@@ -11,7 +11,7 @@ import geopandas as gpd
 from pathlib import Path
 from loguru import logger
 from dotenv import load_dotenv
-from src.config import load_config, resolve_path
+from forest_monitor.config import load_config, resolve_path
 
 load_dotenv()
 

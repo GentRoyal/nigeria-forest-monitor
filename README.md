@@ -1,96 +1,96 @@
 # Nigeria Forest Monitor
 
-A research prototype for detecting unusual Sentinel-1 SAR changes in the Old Oyo–Kwara–Kainji forest corridor and combining them with historical incident proximity for analyst review.
+Nigeria Forest Monitor is becoming a local-first production geospatial system
+for recurring, human-reviewed monitoring of protected forest sites. The primary
+MVP serves a government organisation operating private workspaces, departments,
+teams, controlled verification workflows, and an auditable site history.
 
-The staged plan for evolving this prototype into a full web-based monitoring
-system is tracked in [ROADMAP.md](ROADMAP.md).
+This is not a notebook dashboard or a system for declaring wrongdoing. Satellite
+signals create reviewable observations and possible change events; authorised
+people corroborate and classify them.
 
-This software produces decision-support indicators. A high risk score is **not evidence of hostile activity** and must be corroborated before operational use.
-
-## Architecture
-
-```text
-Sentinel-1 GRD
-  -> linear-scale speckle filtering
-  -> seasonal/historical baseline
-  -> log-ratio change detection
-  -> memory-safe SAR feature classifier
-  -> grid-level signal fusion
-  -> HTML risk map + PDF alert report
-```
-
-The classifier uses six compact features (`VV`, `VH`, local means, and local standard deviations). Earth Engine computes them server-side at a configurable analysis scale with class-aware tiling. This avoids downloading raster patches or evaluating a 10 m texture stack over the entire AOI in an interactive request.
-
-## Project layout
+## Current architecture
 
 ```text
-configs/config.yaml             validated project parameters
-src/config.py                   root-aware configuration and paths
-src/pipeline.py                 shared end-to-end orchestration and CLI
-src/ingestion/                  Earth Engine, ACLED, and grid utilities
-src/preprocessing/              speckle filters, baselines, normalisation
-src/detection/                  change detector, feature model, risk fusion
-src/dashboard/                  Folium map and ReportLab PDF outputs
-notebooks/forest_monitor.ipynb   unified EDA, detection, model, and risk workflow
-tests/                          offline regression tests
+Next.js + MapLibre ──> FastAPI ──> PostgreSQL/PostGIS
+         │                │                 ▲
+         └──> TiTiler     └──> Airflow ─────┘
+                │                 │
+         local COG rasters   shared analysis package
 ```
 
-## Setup (Windows PowerShell)
+All services run locally during the current phases. Vercel, Render, Supabase,
+and cloud object storage are intentionally deferred until deployment needs and
+measured usage justify them.
+
+## Repository layout
+
+```text
+apps/web/                    Next.js and MapLibre monitoring shell
+apps/api/                    versioned FastAPI service and health checks
+apps/tiles/                  restricted local COG tile service
+apps/orchestrator/           Airflow DAGs and batch-orchestration image
+packages/forest_monitor/     reusable geospatial and analytical Python package
+configs/                     analytical configuration
+infra/postgres/init/         local product/Airflow database bootstrap
+notebooks/forest_monitor.ipynb unified research and validation notebook
+docs/                        product, data, architecture, and operations docs
+scripts/                     bootstrap, run, and verification commands
+```
+
+## Start locally
+
+Prerequisites: Python 3.11, Node.js 22+, Docker Desktop, and PowerShell.
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m ipykernel install --user --name nigeria-forest-monitor --display-name "Nigeria Forest Monitor (.venv)"
-earthengine authenticate
+Copy-Item .env.example .env
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
+powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
 ```
 
-Create `.env` in the repository root:
+The stack exposes the web app on `http://localhost:3000`, API documentation on
+`http://localhost:8000/docs`, TiTiler on `http://localhost:8001/docs`, and
+Airflow on `http://localhost:8080`. The project PostgreSQL is available on
+port `5433` by default to avoid collisions with machine-wide PostgreSQL installs.
 
-```dotenv
-GEE_PROJECT=your-google-cloud-project-id
-ACLED_EMAIL=your-myacled-email
-ACLED_PASSWORD=your-myacled-password
-```
+Detailed setup, health checks, and troubleshooting are in
+[docs/local-development.md](docs/local-development.md).
 
-ACLED programmatic access uses OAuth credentials. The fetcher follows the documented `year_where=BETWEEN` filter and paginates beyond the 5,000-row response limit.
+## Validate
 
-## Validate the local code
-
-These checks do not contact Earth Engine or ACLED:
+The consolidated check runs Python compilation, enforced lint/format checks,
+the analytical and service tests, the frontend lint/typecheck/production build,
+and Docker Compose validation:
 
 ```powershell
-.venv\Scripts\python.exe -m compileall -q src tests
-.venv\Scripts\python.exe -m unittest discover -s tests -v
+powershell -ExecutionPolicy Bypass -File scripts\check.ps1
 ```
 
-## Run
+## Analytical workflow
 
-Open `notebooks/forest_monitor.ipynb`, select the `.venv (3.11.9)` / `Nigeria Forest Monitor (.venv)` kernel, then use **Restart Kernel and Run All Cells**. Markdown sections separate setup, EDA, change detection, model training, and risk outputs while sharing the same in-memory baseline and monitoring results.
-
-Or run the shared CLI from the repository root:
+The consolidated notebook remains available for research and detector
+validation. Select the `.venv` kernel and run all cells, or use the packaged CLI:
 
 ```powershell
-.venv\Scripts\python.exe -m src.pipeline --start 2025-01-01 --end 2025-02-01 --zone old_oyo_core
+.venv\Scripts\python.exe -m forest_monitor.pipeline --start 2025-01-01 --end 2025-02-01 --zone old_oyo_core
 ```
 
-Outputs are written under `data/processed/`, `models/`, and `reports/` regardless of whether execution starts in the root directory or `notebooks/`.
+ACLED integration remains only in the legacy research pipeline. It is not part
+of the approved operational event score or government verification workflow.
 
-## Configuration notes
+## Product documentation
 
-- `sentinel1.resolution_m` is the source/display resolution.
-- Native 10 m change pixels are max-aggregated to `classifier.sampling_scale_m` (100 m by default), then requested with tiled stratified sampling rather than a full-resolution count.
-- `risk.weights` must sum to 1.0 and are validated when configuration loads.
-- Missing classifier weights or cached ACLED data do not crash the pipeline; the corresponding signal is set to zero with a warning.
+- [Production roadmap](ROADMAP.md)
+- [MVP product specification](docs/product-spec.md)
+- [Conceptual data model and state machines](docs/data-model.md)
+- [Data governance and database recovery](docs/data-governance.md)
+- [Local-first Airflow orchestration ADR](docs/architecture/0001-local-first-orchestration.md)
+- [Local PostgreSQL authentication ADR](docs/architecture/0002-local-authentication.md)
 
-## Data and model limitations
+## Responsible use
 
-- Notebook 03 uses deterministic weak labels only as a software demonstration. An operational model requires reviewed training labels and independent validation.
-- Sentinel-1 change can reflect flooding, soil moisture, agriculture, fire, or acquisition geometry—not only human activity.
-- The system should support analyst prioritisation, not automated enforcement or targeting.
-
-## External documentation
-
-- [Google Earth Engine Python setup](https://developers.google.com/earth-engine/guides/python_install)
-- [Earth Engine sampling API](https://developers.google.com/earth-engine/apidocs/ee-image-sample)
-- [ACLED API getting started](https://acleddata.com/api-documentation/getting-started)
+Sentinel observations can change because of moisture, flooding, agriculture,
+fire, acquisition geometry, or other benign causes. Outputs are decision-support
+indicators, never proof of illegal or hostile activity. Field validation is
+restricted to authorised government workflows; remote corroboration is the
+default.

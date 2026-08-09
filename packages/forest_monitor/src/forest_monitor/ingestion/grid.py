@@ -10,7 +10,7 @@ from shapely.geometry import box, Point
 import ee
 from pathlib import Path
 from loguru import logger
-from src.config import load_config, resolve_path
+from forest_monitor.config import load_config, resolve_path
 
 
 

@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+def _find_project_root() -> Path:
+    """Locate the monorepo root without depending on the caller's directory."""
+    configured = os.getenv("FOREST_MONITOR_ROOT")
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend((Path.cwd(), Path(__file__).resolve().parent))
+
+    visited: set[Path] = set()
+    for start in candidates:
+        for candidate in (start, *start.parents):
+            candidate = candidate.resolve()
+            if candidate in visited:
+                continue
+            visited.add(candidate)
+            if (candidate / "configs" / "config.yaml").is_file() and (
+                candidate / "ROADMAP.md"
+            ).is_file():
+                return candidate
+    raise RuntimeError(
+        "Could not locate the nigeria-forest-monitor root. "
+        "Set FOREST_MONITOR_ROOT to the repository directory."
+    )
+
+
+PROJECT_ROOT = _find_project_root()
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "config.yaml"
 
 
@@ -41,7 +68,16 @@ def load_config(config_path: str | Path | None = None, *, validate: bool = True)
 
 
 def validate_config(config: dict[str, Any]) -> None:
-    required = {"project", "aoi", "sentinel1", "grid", "change_detection", "classifier", "risk", "paths"}
+    required = {
+        "project",
+        "aoi",
+        "sentinel1",
+        "grid",
+        "change_detection",
+        "classifier",
+        "risk",
+        "paths",
+    }
     missing = sorted(required.difference(config))
     if missing:
         raise ConfigError(f"Missing config sections: {', '.join(missing)}")
@@ -58,7 +94,9 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("risk.weights must sum to 1.0")
 
     splits = config["classifier"]
-    split_total = sum(float(splits.get(key, 0.0)) for key in ("train_split", "val_split", "test_split"))
+    split_total = sum(
+        float(splits.get(key, 0.0)) for key in ("train_split", "val_split", "test_split")
+    )
     if abs(split_total - 1.0) > 1e-6:
         raise ConfigError("classifier train/val/test splits must sum to 1.0")
 
