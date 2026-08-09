@@ -58,3 +58,13 @@ def test_member_administration_batch_is_published() -> None:
     assert {"get", "patch"}.issubset(document["paths"]["/api/v1/members/{user_id}"])
     membership_path = document["paths"]["/api/v1/teams/{team_id}/members/{user_id}"]
     assert {"put", "delete"}.issubset(membership_path)
+
+
+def test_invitation_administration_and_logout_all_are_published() -> None:
+    document = app.openapi()
+    assert "post" in document["paths"]["/api/v1/auth/logout-all"]
+    assert {"get", "post"}.issubset(document["paths"]["/api/v1/invitations"])
+    assert "delete" in document["paths"]["/api/v1/invitations/{invitation_id}"]
+
+    invitation = document["components"]["schemas"]["InvitationData"]["properties"]
+    assert "token_hash" not in invitation

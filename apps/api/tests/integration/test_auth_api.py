@@ -197,3 +197,28 @@ def test_profile_update_validates_payload_and_session_ownership() -> None:
         assert invalid_timezone.status_code == 422
         assert missing_session.status_code == 404
         assert missing_session.json()["code"] == "session_not_found"
+
+
+def test_logout_all_revokes_every_active_session() -> None:
+    with TestClient(app) as client:
+        first = login(client).json()["data"]["access_token"]
+        second = login(client).json()["data"]["access_token"]
+
+        logged_out = client.post(
+            "/api/v1/auth/logout-all",
+            headers={"Authorization": f"Bearer {first}"},
+        )
+        assert logged_out.status_code == 200
+        assert logged_out.json()["data"]["success"] is True
+
+        first_rejected = client.get(
+            "/api/v1/me",
+            headers={"Authorization": f"Bearer {first}"},
+        )
+        second_rejected = client.get(
+            "/api/v1/me",
+            headers={"Authorization": f"Bearer {second}"},
+        )
+        assert first_rejected.status_code == second_rejected.status_code == 401
+        assert first_rejected.json()["code"] == "session_expired"
+        assert second_rejected.json()["code"] == "session_expired"

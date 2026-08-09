@@ -108,10 +108,9 @@ self-service `PATCH /me`, session listing, and single-session revocation
 endpoints from Slice 4.2 are also implemented, along with organisation
 read/update, department administration, and team administration. Logout-all,
 member directory/updates, and team membership assignment are also implemented.
-Logout-all and invitation creation/revocation remain in later
-organisation-administration batches. Until email delivery is connected, only
-the local environment returns a development password-reset token; non-local
-responses remain generic.
+Logout-all and invitation list/create/revoke are also implemented. Until email
+delivery is connected, only the local environment returns development reset or
+invitation tokens; non-local responses never expose raw tokens.
 
 Login request:
 

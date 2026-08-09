@@ -330,6 +330,22 @@ async def logout(
     return EmptyResponse(data=EmptyData(), meta=_meta(request))
 
 
+@router.post("/auth/logout-all", response_model=EmptyResponse)
+async def logout_all(
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> EmptyResponse:
+    await auth_service.revoke_all_sessions(
+        organisation_id=principal.organisation_id,
+        user_id=principal.user_id,
+        actor_id=principal.user_id,
+        reason="user requested logout from all sessions",
+    )
+    _clear_session_cookies(response)
+    return EmptyResponse(data=EmptyData(), meta=_meta(request))
+
+
 @router.get("/me", response_model=ProfileResponse, tags=["profile"])
 async def me(
     request: Request,

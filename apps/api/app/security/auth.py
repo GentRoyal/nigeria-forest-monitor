@@ -121,6 +121,32 @@ class AuthService:
         expires_at = datetime.now(UTC) + timedelta(hours=get_settings().invitation_hours)
         async with tenant_connection(organisation_id, invited_by) as connection:
             await self._require(connection, organisation_id, invited_by, Action.MANAGE_MEMBERS)
+            department = await (
+                await connection.execute(
+                    "SELECT status FROM departments WHERE id=%s",
+                    (department_id,),
+                )
+            ).fetchone()
+            if not department:
+                raise AuthError("department_not_found", "department not found")
+            if department["status"] != "active":
+                raise AuthError("department_archived", "department is archived")
+            existing_member = await (
+                await connection.execute(
+                    "SELECT id FROM user_profiles WHERE email=%s",
+                    (email.strip().lower(),),
+                )
+            ).fetchone()
+            if existing_member:
+                raise AuthError("member_exists", "a member with this email already exists")
+            await connection.execute(
+                """
+                UPDATE invitations SET revoked_at=now()
+                WHERE email=%s AND accepted_at IS NULL AND revoked_at IS NULL
+                  AND expires_at<=now()
+                """,
+                (email.strip().lower(),),
+            )
             try:
                 row = await (
                     await connection.execute(
