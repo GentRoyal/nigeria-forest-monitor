@@ -168,7 +168,7 @@ def workspaces() -> dict[str, tuple[UUID, UUID, UUID]]:
         with connect() as connection:
             connection.execute("SELECT PostGIS_Version()").fetchone()
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            if not revision or revision[0] != "0001_phase3":
+            if not revision or revision[0] != "0002_auth_api":
                 pytest.skip("Phase 3 migration is not applied")
     except psycopg.OperationalError:
         pytest.skip("local PostgreSQL is unavailable")
