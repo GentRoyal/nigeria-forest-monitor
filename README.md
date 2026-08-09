@@ -2,6 +2,9 @@
 
 A research prototype for detecting unusual Sentinel-1 SAR changes in the Old Oyo–Kwara–Kainji forest corridor and combining them with historical incident proximity for analyst review.
 
+The staged plan for evolving this prototype into a full web-based monitoring
+system is tracked in [ROADMAP.md](ROADMAP.md).
+
 This software produces decision-support indicators. A high risk score is **not evidence of hostile activity** and must be corroborated before operational use.
 
 ## Architecture
