@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     invitation_hours: int = 72
     password_reset_minutes: int = 30
     password_pepper: str = "local-development-pepper-change-me"
+    refresh_cookie_name: str = "nfm_refresh_token"
+    csrf_cookie_name: str = "nfm_csrf_token"
+    cookie_secure: bool = False
+    cookie_samesite: str = "strict"
     seed_admin_email: str = "owner@nfm.local"
     seed_admin_password: str = "LocalForest!2026"
 

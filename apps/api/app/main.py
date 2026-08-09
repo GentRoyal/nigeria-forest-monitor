@@ -1,10 +1,14 @@
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.errors import register_error_handlers
+from .api.middleware import RequestContextMiddleware, configure_logging
+from .api.v1.router import router as v1_router
 from .database import database_is_ready
 from .settings import get_settings
 
 settings = get_settings()
+configure_logging()
 
 app = FastAPI(
     title="Nigeria Forest Monitor API",
@@ -16,8 +20,17 @@ app.add_middleware(
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Idempotency-Key",
+        "X-CSRF-Token",
+        "X-Request-ID",
+    ],
 )
+app.add_middleware(RequestContextMiddleware)
+register_error_handlers(app)
+app.include_router(v1_router)
 
 
 @app.get("/health/live", tags=["health"])

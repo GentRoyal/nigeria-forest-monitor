@@ -29,7 +29,57 @@ class TokenPair:
     session_id: UUID
 
 
+@dataclass(frozen=True)
+class InvitationSummary:
+    invitation_id: UUID
+    masked_email: str
+    role: str
+    organisation_name: str
+    department_name: str
+    expires_at: datetime
+
+
 class AuthService:
+    async def invitation_summary(
+        self,
+        *,
+        organisation_id: UUID,
+        token: str,
+    ) -> InvitationSummary:
+        async with tenant_connection(organisation_id) as connection:
+            invitation = await (
+                await connection.execute(
+                    """
+                    SELECT
+                      i.id,i.email::text email,i.role,i.expires_at,
+                      o.name organisation_name,d.name department_name
+                    FROM invitations i
+                    JOIN organisations o ON o.id=i.organisation_id
+                    JOIN departments d
+                      ON d.organisation_id=i.organisation_id
+                     AND d.id=i.department_id
+                    WHERE i.token_hash=%s
+                      AND i.accepted_at IS NULL
+                      AND i.revoked_at IS NULL
+                      AND i.expires_at>now()
+                    """,
+                    (hash_opaque_token(token),),
+                )
+            ).fetchone()
+        if not invitation:
+            raise AuthError("invalid_invitation", "invitation is invalid or expired")
+        local, separator, domain = invitation["email"].partition("@")
+        masked_local = f"{local[:1]}***" if local else "***"
+        masked_email = f"{masked_local}{separator}{domain}" if separator else masked_local
+        return InvitationSummary(
+            invitation_id=invitation["id"],
+            masked_email=masked_email,
+            role=invitation["role"],
+            organisation_name=invitation["organisation_name"],
+            department_name=invitation["department_name"],
+            expires_at=invitation["expires_at"],
+        )
+
     async def _active_actor(self, connection, organisation_id: UUID, actor_id: UUID) -> dict:
         row = await (
             await connection.execute(
@@ -226,10 +276,10 @@ class AuthService:
                         """
                         UPDATE auth_credentials
                         SET failed_attempts=%s,locked_until=%s,
-                            status=CASE WHEN %s IS NULL THEN status ELSE 'locked' END
+                            status=CASE WHEN %s THEN 'locked' ELSE status END
                         WHERE user_id=%s
                         """,
-                        (attempts, locked_until, locked_until, row["id"]),
+                        (attempts, locked_until, locked_until is not None, row["id"]),
                     )
                     await record_audit(
                         connection,
@@ -423,6 +473,46 @@ class AuthService:
                 target_id=user_id,
                 reason=reason,
             )
+
+    async def revoke_session(
+        self,
+        *,
+        organisation_id: UUID,
+        user_id: UUID,
+        session_id: UUID,
+        reason: str = "logged out",
+    ) -> None:
+        async with tenant_connection(organisation_id, user_id) as connection:
+            session = await (
+                await connection.execute(
+                    """
+                    SELECT id,revoked_at FROM auth_sessions
+                    WHERE id=%s AND user_id=%s
+                    FOR UPDATE
+                    """,
+                    (session_id, user_id),
+                )
+            ).fetchone()
+            if not session:
+                return
+            if session["revoked_at"] is None:
+                await connection.execute(
+                    """
+                    UPDATE auth_sessions
+                    SET revoked_at=now(),revoke_reason=%s
+                    WHERE id=%s
+                    """,
+                    (reason, session_id),
+                )
+                await record_audit(
+                    connection,
+                    organisation_id=organisation_id,
+                    actor_id=user_id,
+                    action="authentication.logged_out",
+                    target_type="auth_session",
+                    target_id=session_id,
+                    reason=reason,
+                )
 
     async def change_member_status(
         self,

@@ -44,6 +44,8 @@ services:
       NFM_SEED_ADMIN_PASSWORD: ${NFM_SEED_ADMIN_PASSWORD:-LocalForest!2026}
       NFM_ACCESS_TOKEN_SECRET: ${NFM_ACCESS_TOKEN_SECRET:-local-development-signing-key-change-me}
       NFM_PASSWORD_PEPPER: ${NFM_PASSWORD_PEPPER:-local-development-pepper-change-me}
+      NFM_COOKIE_SECURE: ${NFM_COOKIE_SECURE:-false}
+      NFM_COOKIE_SAMESITE: ${NFM_COOKIE_SAMESITE:-strict}
     ports:
       - "${NFM_API_PORT:-8000}:8000"
     depends_on:
