@@ -1,3 +1,4 @@
+import hashlib
 import ipaddress
 import json
 from calendar import monthrange
@@ -25,6 +26,9 @@ from ...schemas.sites import (
     GridVersionListMeta,
     GridVersionListResponse,
     GridVersionResponse,
+    JobData,
+    JobResponse,
+    ManualJobRequest,
     ScheduleData,
     ScheduleResponse,
     ScheduleSuspendRequest,
@@ -1292,6 +1296,129 @@ async def archive_site_schedule(
             ip_address=_client_ip(request),
         )
     return Response(status_code=204)
+
+
+@router.post("/sites/{site_id}/jobs", response_model=JobResponse, status_code=201)
+async def request_manual_job(
+    site_id: UUID,
+    payload: ManualJobRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(current_principal)],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=200)],
+) -> JobResponse:
+    _require_management(principal)
+    visibility, visibility_params = _visibility_sql(principal)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params, lock=True)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        schedule = await (
+            await connection.execute(
+                "SELECT status FROM monitoring_schedules WHERE site_id=%s AND status<>'archived'",
+                (site_id,),
+            )
+        ).fetchone()
+        if schedule and schedule["status"] == "suspended" and not payload.suspended_site_override:
+            raise ApiError(
+                409,
+                "site_monitoring_suspended",
+                "Site monitoring is suspended",
+                "Resume the schedule or explicitly acknowledge a manual override.",
+            )
+        observation = None
+        if payload.observation_id:
+            observation = await (
+                await connection.execute(
+                    "SELECT id,grid_version_id FROM observations WHERE id=%s AND site_id=%s",
+                    (payload.observation_id, site_id),
+                )
+            ).fetchone()
+            if not observation:
+                raise ApiError(
+                    404,
+                    "observation_not_found",
+                    "Observation not found",
+                    "The observation does not belong to this site or is unavailable.",
+                )
+        grid_version_id = (
+            observation["grid_version_id"] if observation else site["current_grid_version_id"]
+        )
+        domain_document = {
+            "site_id": str(site_id),
+            "observation_id": str(payload.observation_id) if payload.observation_id else None,
+            "job_type": payload.job_type,
+            "grid_version_id": str(grid_version_id) if grid_version_id else None,
+            "processing_version": payload.processing_version,
+        }
+        domain_key = hashlib.sha256(
+            json.dumps(domain_document, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        existing = await (
+            await connection.execute(
+                "SELECT id,site_id,observation_id,grid_version_id,job_type,trigger_type,priority,status,progress,created_at,updated_at FROM processing_jobs WHERE idempotency_key=%s",
+                (domain_key,),
+            )
+        ).fetchone()
+        if existing:
+            response.status_code = 200
+            return JobResponse(data=JobData.model_validate(existing), meta=_meta(request))
+        try:
+            job = await (
+                await connection.execute(
+                    """INSERT INTO processing_jobs(organisation_id,site_id,observation_id,grid_version_id,job_type,trigger_type,priority,idempotency_key,requested_configuration,requested_by) VALUES (%s,%s,%s,%s,%s,'manual',%s,%s,%s,%s) RETURNING id,site_id,observation_id,grid_version_id,job_type,trigger_type,priority,status,progress,created_at,updated_at""",
+                    (
+                        principal.organisation_id,
+                        site_id,
+                        payload.observation_id,
+                        grid_version_id,
+                        payload.job_type,
+                        payload.priority,
+                        domain_key,
+                        Jsonb(
+                            {
+                                "processing_version": payload.processing_version,
+                                "http_idempotency_key": idempotency_key,
+                                "suspended_site_override": payload.suspended_site_override,
+                            }
+                        ),
+                        principal.user_id,
+                    ),
+                )
+            ).fetchone()
+        except UniqueViolation:
+            existing = await (
+                await connection.execute(
+                    "SELECT id,site_id,observation_id,grid_version_id,job_type,trigger_type,priority,status,progress,created_at,updated_at FROM processing_jobs WHERE idempotency_key=%s",
+                    (domain_key,),
+                )
+            ).fetchone()
+            response.status_code = 200
+            return JobResponse(data=JobData.model_validate(existing), meta=_meta(request))
+        await record_audit(
+            connection,
+            organisation_id=principal.organisation_id,
+            actor_id=principal.user_id,
+            action="processing_job.manual_requested",
+            target_type="processing_job",
+            target_id=job["id"],
+            after={
+                "site_id": str(site_id),
+                "job_type": payload.job_type,
+                "observation_id": str(payload.observation_id) if payload.observation_id else None,
+                "grid_version_id": str(grid_version_id) if grid_version_id else None,
+                "priority": payload.priority,
+                "suspended_site_override": payload.suspended_site_override,
+            },
+            ip_address=_client_ip(request),
+        )
+    response.headers["Location"] = f"/api/v1/jobs/{job['id']}"
+    return JobResponse(data=JobData.model_validate(job), meta=_meta(request))
 
 
 @router.get("/sites/{site_id}/grid-cells", response_model=GridCellListResponse)

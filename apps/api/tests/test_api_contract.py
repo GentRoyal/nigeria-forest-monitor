@@ -130,3 +130,10 @@ def test_schedule_lifecycle_batch_is_published() -> None:
     assert "post" in document["paths"]["/api/v1/sites/{site_id}/schedule/suspend"]
     assert "post" in document["paths"]["/api/v1/sites/{site_id}/schedule/resume"]
     assert "delete" in document["paths"]["/api/v1/sites/{site_id}/schedule"]
+
+
+def test_manual_job_request_is_published() -> None:
+    document = app.openapi()
+    assert "post" in document["paths"]["/api/v1/sites/{site_id}/jobs"]
+    request = document["components"]["schemas"]["ManualJobRequest"]["properties"]
+    assert {"job_type", "priority", "suspended_site_override"}.issubset(request)

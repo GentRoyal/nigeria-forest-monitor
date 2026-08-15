@@ -551,3 +551,61 @@ def test_schedule_suspend_resume_and_archive() -> None:
         replacement = client.put(f"/api/v1/sites/{site_id}/schedule", headers=headers, json=payload)
         assert replacement.status_code == 200
         assert replacement.json()["data"]["scheduling_version"] == 1
+
+
+def test_manual_job_request_is_idempotent_and_respects_suspension() -> None:
+    slug = f"manual-job-{uuid4().hex}"
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {login(client)}"}
+        site = client.post("/api/v1/sites", headers=headers, json=site_payload(slug))
+        assert site.status_code == 201
+        site_id = site.json()["data"]["id"]
+        job_headers = {**headers, "Idempotency-Key": f"manual-{uuid4().hex}"}
+        request = {"job_type": "discovery", "priority": 4}
+        created = client.post(f"/api/v1/sites/{site_id}/jobs", headers=job_headers, json=request)
+        assert created.status_code == 201, created.text
+        job = created.json()["data"]
+        assert job["job_type"] == "discovery"
+        assert job["trigger_type"] == "manual"
+        assert job["status"] == "queued"
+        assert created.headers["location"].endswith(job["id"])
+
+        replay = client.post(f"/api/v1/sites/{site_id}/jobs", headers=job_headers, json=request)
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["data"]["id"] == job["id"]
+        invalid_processing = client.post(
+            f"/api/v1/sites/{site_id}/jobs",
+            headers={**headers, "Idempotency-Key": f"invalid-{uuid4().hex}"},
+            json={"job_type": "processing"},
+        )
+        assert invalid_processing.status_code == 422
+
+        schedule = client.put(
+            f"/api/v1/sites/{site_id}/schedule",
+            headers=headers,
+            json={"cadence": "weekly", "sensor_settings": {}, "quality_settings": {}},
+        )
+        assert schedule.status_code == 200
+        suspended = client.post(
+            f"/api/v1/sites/{site_id}/schedule/suspend",
+            headers={**headers, "If-Match": schedule.headers["etag"]},
+            json={"reason": "Controlled manual job test"},
+        )
+        assert suspended.status_code == 200
+        blocked = client.post(
+            f"/api/v1/sites/{site_id}/jobs",
+            headers={**headers, "Idempotency-Key": f"blocked-{uuid4().hex}"},
+            json=request,
+        )
+        assert blocked.status_code == 409
+        override = client.post(
+            f"/api/v1/sites/{site_id}/jobs",
+            headers={**headers, "Idempotency-Key": f"override-{uuid4().hex}"},
+            json={
+                **request,
+                "suspended_site_override": True,
+                "override_warning_acknowledged": True,
+            },
+        )
+        assert override.status_code == 200
+        assert override.json()["data"]["id"] == job["id"]

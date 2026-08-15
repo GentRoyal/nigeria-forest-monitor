@@ -235,6 +235,44 @@ class ScheduleResponse(BaseModel):
     meta: ResponseMeta
 
 
+class ManualJobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_type: Literal["discovery", "processing", "reprocessing"]
+    observation_id: UUID | None = None
+    processing_version: str | None = Field(default=None, max_length=120)
+    priority: int = Field(default=5, ge=1, le=9)
+    suspended_site_override: bool = False
+    override_warning_acknowledged: bool = False
+
+    @model_validator(mode="after")
+    def require_observation_for_processing(self) -> "ManualJobRequest":
+        if self.job_type in {"processing", "reprocessing"} and self.observation_id is None:
+            raise ValueError("processing and reprocessing jobs require observation_id")
+        if self.suspended_site_override and not self.override_warning_acknowledged:
+            raise ValueError("suspended-site overrides require warning acknowledgement")
+        return self
+
+
+class JobData(BaseModel):
+    id: UUID
+    site_id: UUID
+    observation_id: UUID | None
+    grid_version_id: UUID | None
+    job_type: str
+    trigger_type: str
+    priority: int
+    status: str
+    progress: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class JobResponse(BaseModel):
+    data: JobData
+    meta: ResponseMeta
+
+
 class GridCellData(BaseModel):
     id: UUID
     grid_version_id: UUID
