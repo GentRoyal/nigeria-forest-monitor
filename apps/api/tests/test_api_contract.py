@@ -68,3 +68,24 @@ def test_invitation_administration_and_logout_all_are_published() -> None:
 
     invitation = document["components"]["schemas"]["InvitationData"]["properties"]
     assert "token_hash" not in invitation
+
+
+def test_audit_query_is_published_without_secret_storage_fields() -> None:
+    document = app.openapi()
+    assert "get" in document["paths"]["/api/v1/admin/audit-events"]
+    event = document["components"]["schemas"]["AuditEventData"]["properties"]
+    assert "token_hash" not in event
+    assert "password_hash" not in event
+
+
+def test_first_site_management_batch_is_published() -> None:
+    document = app.openapi()
+    assert {"get", "post"}.issubset(document["paths"]["/api/v1/sites"])
+    assert {"get", "patch"}.issubset(document["paths"]["/api/v1/sites/{site_id}"])
+
+    create = document["components"]["schemas"]["SiteCreateRequest"]["properties"]
+    assert "boundary" in create
+    assert "created_by" not in create
+    boundary = document["components"]["schemas"]["BoundaryCreateRequest"]["properties"]
+    assert "checksum" not in boundary
+    assert "validation_result" not in boundary

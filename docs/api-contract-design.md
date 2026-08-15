@@ -112,6 +112,10 @@ Logout-all and invitation list/create/revoke are also implemented. Until email
 delivery is connected, only the local environment returns development reset or
 invitation tokens; non-local responses never expose raw tokens.
 
+The privileged, organisation-scoped audit query is implemented at
+`GET /api/v1/admin/audit-events` with signed cursor pagination, safe filters,
+summary redaction, and owner/administrator access. This completes Slice 4.2.
+
 Login request:
 
 ~~~json
@@ -397,6 +401,10 @@ Department changes must remove or replace team memberships that would violate
 the same-department rule in one transaction.
 
 ## 13. Site endpoints
+
+Implementation status: the first batch (list, create, detail, and versioned
+metadata update) is implemented. Boundary history, lifecycle, grids, team
+grants, and timeline remain later batches.
 
 | Method | Path | Purpose |
 |---|---|---|

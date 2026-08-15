@@ -12,11 +12,14 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://forest_monitor:forest_monitor@localhost:5433/forest_monitor"
     cors_origins: str = "http://localhost:3000"
     access_token_secret: str = "local-development-signing-key-change-me"
+    cursor_signing_secret: str = "local-development-cursor-key-change-me"
     access_token_minutes: int = 15
     jwt_leeway_seconds: int = Field(default=30, ge=0, le=300)
     refresh_token_days: int = 14
     invitation_hours: int = 72
     password_reset_minutes: int = 30
+    max_aoi_area_sq_km: float = Field(default=2_000_000, gt=0)
+    max_aoi_vertices: int = Field(default=100_000, ge=4, le=1_000_000)
     password_pepper: str = "local-development-pepper-change-me"
     refresh_cookie_name: str = "nfm_refresh_token"
     csrf_cookie_name: str = "nfm_csrf_token"
