@@ -101,3 +101,11 @@ def test_boundary_version_batch_is_published() -> None:
     assert "checksum" not in request
     boundary = document["components"]["schemas"]["BoundaryData"]["properties"]
     assert {"created_by", "change_reason", "superseded_at", "is_current"}.issubset(boundary)
+
+
+def test_grid_read_batch_is_published() -> None:
+    document = app.openapi()
+    assert "get" in document["paths"]["/api/v1/sites/{site_id}/grids"]
+    assert "get" in document["paths"]["/api/v1/sites/{site_id}/grid-cells"]
+    cell = document["components"]["schemas"]["GridCellData"]["properties"]
+    assert {"cell_key", "geometry", "area_sq_m"}.issubset(cell)

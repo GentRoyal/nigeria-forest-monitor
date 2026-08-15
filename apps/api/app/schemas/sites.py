@@ -154,6 +154,49 @@ class BoundaryListResponse(BaseModel):
     meta: BoundaryListMeta
 
 
+class GridVersionData(BaseModel):
+    id: UUID
+    version: int
+    method: str
+    resolution_metres: float
+    parameters: dict[str, Any]
+    creation_reason: str
+    processing_compatibility: str
+    cell_count: int
+    superseded_at: datetime | None
+    is_current: bool
+    created_at: datetime
+
+
+class GridVersionListMeta(ResponseMeta):
+    next_cursor: str | None = None
+
+
+class GridVersionListResponse(BaseModel):
+    data: list[GridVersionData]
+    meta: GridVersionListMeta
+
+
+class GridCellData(BaseModel):
+    id: UUID
+    grid_version_id: UUID
+    cell_key: str
+    display_label: str | None
+    geometry: dict[str, Any]
+    area_sq_m: float
+    created_at: datetime
+
+
+class GridCellListMeta(ResponseMeta):
+    next_cursor: str | None = None
+    grid_version_id: UUID
+
+
+class GridCellListResponse(BaseModel):
+    data: list[GridCellData]
+    meta: GridCellListMeta
+
+
 class SiteData(BaseModel):
     id: UUID
     organisation_id: UUID

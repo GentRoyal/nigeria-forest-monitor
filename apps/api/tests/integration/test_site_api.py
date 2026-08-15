@@ -299,3 +299,88 @@ def test_boundary_history_replacement_etag_and_immutability() -> None:
 
     with pytest.raises(ObjectNotInPrerequisiteState):
         asyncio.run(mutate_historical_boundary())
+
+
+def test_grid_history_and_viewport_cell_queries() -> None:
+    import asyncio
+
+    from apps.api.app.db import tenant_connection
+
+    slug = f"grid-{uuid4().hex}"
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {login(client)}"}
+        created = client.post("/api/v1/sites", headers=headers, json=site_payload(slug))
+        assert created.status_code == 201, created.text
+        site_id = created.json()["data"]["id"]
+        grid_id = uuid4()
+
+        async def seed_grid() -> None:
+            async with tenant_connection(ORGANISATION_ID, OWNER_ID) as connection:
+                await connection.execute(
+                    """INSERT INTO grid_versions(
+                      id,organisation_id,site_id,version,method,resolution_metres,
+                      parameters,creation_reason,processing_compatibility
+                    ) VALUES (%s,%s,%s,1,'square',1000,'{}'::jsonb,
+                      'Integration grid fixture','v1')""",
+                    (grid_id, ORGANISATION_ID, site_id),
+                )
+                for key, polygon in (
+                    ("A-01", "POLYGON((3 8,3.1 8,3.1 8.1,3 8.1,3 8))"),
+                    ("A-02", "POLYGON((3.1 8,3.2 8,3.2 8.1,3.1 8.1,3.1 8))"),
+                    ("B-01", "POLYGON((4 8,4.1 8,4.1 8.1,4 8.1,4 8))"),
+                ):
+                    await connection.execute(
+                        """INSERT INTO grid_cells(
+                          organisation_id,grid_version_id,cell_key,display_label,geometry,area_sq_m
+                        ) VALUES (%s,%s,%s,%s,ST_GeomFromText(%s,4326),1000000)""",
+                        (ORGANISATION_ID, grid_id, key, f"Cell {key}", polygon),
+                    )
+                await connection.execute(
+                    "UPDATE sites SET current_grid_version_id=%s WHERE id=%s", (grid_id, site_id)
+                )
+
+        asyncio.run(seed_grid())
+
+        grids = client.get(f"/api/v1/sites/{site_id}/grids", headers=headers)
+        assert grids.status_code == 200, grids.text
+        assert len(grids.json()["data"]) == 1
+        grid = grids.json()["data"][0]
+        assert grid["id"] == str(grid_id)
+        assert grid["is_current"] is True
+        assert grid["cell_count"] == 3
+
+        unbounded = client.get(f"/api/v1/sites/{site_id}/grid-cells", headers=headers)
+        assert unbounded.status_code == 422
+        assert unbounded.json()["code"] == "grid_query_filter_required"
+        viewport = client.get(
+            f"/api/v1/sites/{site_id}/grid-cells",
+            headers=headers,
+            params={"bbox": "2.95,7.95,3.15,8.15"},
+        )
+        assert viewport.status_code == 200, viewport.text
+        assert {cell["cell_key"] for cell in viewport.json()["data"]} == {"A-01", "A-02"}
+        assert all(cell["geometry"]["type"] == "Polygon" for cell in viewport.json()["data"])
+
+        exact = client.get(
+            f"/api/v1/sites/{site_id}/grid-cells",
+            headers=headers,
+            params={"cell_key": "B-01"},
+        )
+        assert exact.status_code == 200
+        assert [cell["cell_key"] for cell in exact.json()["data"]] == ["B-01"]
+
+        first_page = client.get(
+            f"/api/v1/sites/{site_id}/grid-cells",
+            headers=headers,
+            params={"bbox": "2.9,7.9,4.2,8.2", "limit": 1},
+        )
+        assert first_page.status_code == 200
+        cursor = first_page.json()["meta"]["next_cursor"]
+        assert cursor
+        second_page = client.get(
+            f"/api/v1/sites/{site_id}/grid-cells",
+            headers=headers,
+            params={"bbox": "2.9,7.9,4.2,8.2", "limit": 1, "cursor": cursor},
+        )
+        assert second_page.status_code == 200
+        assert second_page.json()["data"][0]["id"] != first_page.json()["data"][0]["id"]

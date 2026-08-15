@@ -15,6 +15,12 @@ from ...schemas.sites import (
     BoundaryListResponse,
     BoundaryResponse,
     BoundaryVersionCreateRequest,
+    GridCellData,
+    GridCellListMeta,
+    GridCellListResponse,
+    GridVersionData,
+    GridVersionListMeta,
+    GridVersionListResponse,
     SiteCreateRequest,
     SiteData,
     SiteListMeta,
@@ -132,7 +138,7 @@ def _visibility_sql(principal: Principal, alias: str = "s") -> tuple[str, list[A
 _SITE_COLUMNS = """
   s.id,s.organisation_id,s.managing_department_id,d.name managing_department_name,
   s.name,s.slug,s.description,s.origin,s.sensitivity,s.status,s.monitoring_health,
-  s.version,s.created_at,s.updated_at,
+  s.version,s.current_grid_version_id,s.created_at,s.updated_at,
   COALESCE((SELECT jsonb_agg(jsonb_build_object('id',t.id,'name',t.name) ORDER BY t.name)
     FROM site_tags st JOIN tags t ON t.id=st.tag_id WHERE st.site_id=s.id),'[]'::jsonb) tags,
   b.id boundary_id,b.version boundary_version,
@@ -694,6 +700,191 @@ async def create_site_boundary(
     response.headers["Location"] = f"/api/v1/sites/{site_id}/boundaries"
     return BoundaryResponse(
         data=_boundary_data(created, include_geometry=True), meta=_meta(request)
+    )
+
+
+@router.get("/sites/{site_id}/grids", response_model=GridVersionListResponse)
+async def list_site_grids(
+    site_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
+) -> GridVersionListResponse:
+    visibility, visibility_params = _visibility_sql(principal)
+    scope = cursor_scope(
+        {
+            "organisation_id": str(principal.organisation_id),
+            "user_id": str(principal.user_id),
+            "role": principal.role,
+            "site_id": str(site_id),
+        }
+    )
+    position = None
+    if cursor:
+        try:
+            position = decode_cursor(cursor, scope=scope)
+        except CursorError as error:
+            raise ApiError(
+                400,
+                "invalid_cursor",
+                "Invalid pagination cursor",
+                "The cursor is invalid or does not belong to this grid query.",
+            ) from error
+    cursor_time = position.created_at if position else None
+    cursor_id = position.resource_id if position else None
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        rows = await (
+            await connection.execute(
+                """SELECT g.id,g.version,g.method,g.resolution_metres,g.parameters,
+                  g.creation_reason,g.processing_compatibility,g.superseded_at,g.created_at,
+                  (g.id=s.current_grid_version_id) is_current,
+                  (SELECT count(*) FROM grid_cells c WHERE c.grid_version_id=g.id) cell_count
+                FROM grid_versions g JOIN sites s ON s.id=g.site_id
+                WHERE g.site_id=%s
+                  AND (%s::timestamptz IS NULL OR (g.created_at,g.id)<(%s,%s::uuid))
+                ORDER BY g.created_at DESC,g.id DESC LIMIT %s""",
+                (site_id, cursor_time, cursor_time, cursor_id, limit + 1),
+            )
+        ).fetchall()
+    page, has_more = rows[:limit], len(rows) > limit
+    next_cursor = (
+        encode_cursor(CursorPosition(page[-1]["created_at"], page[-1]["id"]), scope=scope)
+        if has_more
+        else None
+    )
+    return GridVersionListResponse(
+        data=[GridVersionData.model_validate(row) for row in page],
+        meta=GridVersionListMeta(
+            request_id=UUID(request.state.request_id), next_cursor=next_cursor
+        ),
+    )
+
+
+@router.get("/sites/{site_id}/grid-cells", response_model=GridCellListResponse)
+async def list_grid_cells(
+    site_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+    grid_version_id: Annotated[UUID | None, Query()] = None,
+    bbox: Annotated[str | None, Query()] = None,
+    cell_key: Annotated[str | None, Query(min_length=1, max_length=160)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
+) -> GridCellListResponse:
+    bounds = _bbox(bbox)
+    normalised_key = cell_key.strip() if cell_key else None
+    if bounds is None and not normalised_key:
+        raise ApiError(
+            422,
+            "grid_query_filter_required",
+            "Grid-cell filter required",
+            "Provide bbox for map browsing or cell_key for an exact grid-cell lookup.",
+        )
+    visibility, visibility_params = _visibility_sql(principal)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        resolved_grid_id = grid_version_id or site["current_grid_version_id"]
+        if resolved_grid_id is None:
+            raise ApiError(
+                409,
+                "grid_not_available",
+                "Grid is not available",
+                "This site has no current grid version yet.",
+            )
+        grid = await (
+            await connection.execute(
+                "SELECT id FROM grid_versions WHERE id=%s AND site_id=%s",
+                (resolved_grid_id, site_id),
+            )
+        ).fetchone()
+        if not grid:
+            raise ApiError(
+                404,
+                "grid_version_not_found",
+                "Grid version not found",
+                "The grid version does not belong to this site or is unavailable.",
+            )
+        scope = cursor_scope(
+            {
+                "organisation_id": str(principal.organisation_id),
+                "user_id": str(principal.user_id),
+                "role": principal.role,
+                "site_id": str(site_id),
+                "grid_version_id": str(resolved_grid_id),
+                "bbox": bounds,
+                "cell_key": normalised_key,
+            }
+        )
+        position = None
+        if cursor:
+            try:
+                position = decode_cursor(cursor, scope=scope)
+            except CursorError as error:
+                raise ApiError(
+                    400,
+                    "invalid_cursor",
+                    "Invalid pagination cursor",
+                    "The cursor is invalid or does not belong to this grid-cell query.",
+                ) from error
+        cursor_time = position.created_at if position else None
+        cursor_id = position.resource_id if position else None
+        bbox_values = bounds or (None, None, None, None)
+        rows = await (
+            await connection.execute(
+                """SELECT c.id,c.grid_version_id,c.cell_key,c.display_label,
+                  ST_AsGeoJSON(c.geometry,9,0)::jsonb geometry,c.area_sq_m,c.created_at
+                FROM grid_cells c
+                WHERE c.grid_version_id=%s
+                  AND (%s::text IS NULL OR c.cell_key=%s)
+                  AND (%s::double precision IS NULL OR (
+                    c.geometry && ST_MakeEnvelope(%s,%s,%s,%s,4326)
+                    AND ST_Intersects(c.geometry,ST_MakeEnvelope(%s,%s,%s,%s,4326))
+                  ))
+                  AND (%s::timestamptz IS NULL OR (c.created_at,c.id)<(%s,%s::uuid))
+                ORDER BY c.created_at DESC,c.id DESC LIMIT %s""",
+                (
+                    resolved_grid_id,
+                    normalised_key,
+                    normalised_key,
+                    bbox_values[0],
+                    *bbox_values,
+                    *bbox_values,
+                    cursor_time,
+                    cursor_time,
+                    cursor_id,
+                    limit + 1,
+                ),
+            )
+        ).fetchall()
+    page, has_more = rows[:limit], len(rows) > limit
+    next_cursor = (
+        encode_cursor(CursorPosition(page[-1]["created_at"], page[-1]["id"]), scope=scope)
+        if has_more
+        else None
+    )
+    return GridCellListResponse(
+        data=[GridCellData.model_validate(row) for row in page],
+        meta=GridCellListMeta(
+            request_id=UUID(request.state.request_id),
+            next_cursor=next_cursor,
+            grid_version_id=resolved_grid_id,
+        ),
     )
 
 

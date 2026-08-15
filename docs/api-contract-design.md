@@ -492,6 +492,11 @@ Grid generation creates an immutable grid version and stable cell keys. Changing
 the grid later creates another version; historical observations continue to
 reference the prior version.
 
+Grid version history and map cell retrieval are implemented. Map requests must
+supply either a viewport `bbox` or an exact `cell_key`; responses are keyset
+paginated and include GeoJSON cell geometry. Grid generation/import remain
+separate write endpoints.
+
 ## 14. Tags, search, and saved filters
 
 Proposed endpoints:
