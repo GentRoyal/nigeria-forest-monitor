@@ -197,6 +197,33 @@ class GridVersionResponse(BaseModel):
     meta: ResponseMeta
 
 
+class ScheduleUpsertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cadence: Literal["weekly", "fortnightly", "monthly"]
+    sensor_settings: dict[str, Any] = Field(default_factory=dict)
+    quality_settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScheduleData(BaseModel):
+    id: UUID
+    site_id: UUID
+    cadence: str
+    sensor_settings: dict[str, Any]
+    quality_settings: dict[str, Any]
+    next_due_at: datetime
+    status: str
+    scheduling_version: int
+    changed_by: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScheduleResponse(BaseModel):
+    data: ScheduleData
+    meta: ResponseMeta
+
+
 class GridCellData(BaseModel):
     id: UUID
     grid_version_id: UUID

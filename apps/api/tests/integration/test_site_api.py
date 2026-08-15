@@ -454,3 +454,54 @@ def test_square_grid_generation_is_versioned_and_immutable() -> None:
 
     with pytest.raises(ObjectNotInPrerequisiteState):
         asyncio.run(mutate_grid())
+
+
+def test_schedule_create_read_and_versioned_replace() -> None:
+    slug = f"schedule-{uuid4().hex}"
+    payload = {
+        "cadence": "weekly",
+        "sensor_settings": {"preferred_sensors": ["sentinel-1", "sentinel-2"]},
+        "quality_settings": {"minimum_coverage": 0.9, "maximum_cloud_cover": 20},
+    }
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {login(client)}"}
+        created = client.post("/api/v1/sites", headers=headers, json=site_payload(slug))
+        assert created.status_code == 201, created.text
+        site_id = created.json()["data"]["id"]
+
+        absent = client.get(f"/api/v1/sites/{site_id}/schedule", headers=headers)
+        assert absent.status_code == 404
+        schedule = client.put(f"/api/v1/sites/{site_id}/schedule", headers=headers, json=payload)
+        assert schedule.status_code == 200, schedule.text
+        assert schedule.json()["data"]["cadence"] == "weekly"
+        assert schedule.json()["data"]["scheduling_version"] == 1
+        assert schedule.json()["data"]["sensor_settings"] == payload["sensor_settings"]
+        etag = schedule.headers["etag"]
+
+        current = client.get(f"/api/v1/sites/{site_id}/schedule", headers=headers)
+        assert current.status_code == 200
+        assert current.headers["etag"] == etag
+        assert current.json()["data"]["next_due_at"]
+
+        missing = client.put(
+            f"/api/v1/sites/{site_id}/schedule",
+            headers=headers,
+            json={**payload, "cadence": "fortnightly"},
+        )
+        assert missing.status_code == 428
+        updated = client.put(
+            f"/api/v1/sites/{site_id}/schedule",
+            headers={**headers, "If-Match": etag},
+            json={**payload, "cadence": "fortnightly"},
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["data"]["cadence"] == "fortnightly"
+        assert updated.json()["data"]["scheduling_version"] == 2
+        assert updated.headers["etag"] != etag
+
+        stale = client.put(
+            f"/api/v1/sites/{site_id}/schedule",
+            headers={**headers, "If-Match": etag},
+            json=payload,
+        )
+        assert stale.status_code == 409

@@ -116,3 +116,10 @@ def test_grid_generation_batch_is_published() -> None:
     assert "post" in document["paths"]["/api/v1/sites/{site_id}/grids/generate"]
     request = document["components"]["schemas"]["GridGenerateRequest"]["properties"]
     assert {"method", "resolution_metres", "clip_to_boundary", "creation_reason"}.issubset(request)
+
+
+def test_initial_schedule_batch_is_published() -> None:
+    document = app.openapi()
+    assert {"get", "put"}.issubset(document["paths"]["/api/v1/sites/{site_id}/schedule"])
+    schedule = document["components"]["schemas"]["ScheduleData"]["properties"]
+    assert {"cadence", "next_due_at", "scheduling_version", "status"}.issubset(schedule)

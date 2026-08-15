@@ -1,5 +1,7 @@
 import ipaddress
 import json
+from calendar import monthrange
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -23,6 +25,9 @@ from ...schemas.sites import (
     GridVersionListMeta,
     GridVersionListResponse,
     GridVersionResponse,
+    ScheduleData,
+    ScheduleResponse,
+    ScheduleUpsertRequest,
     SiteCreateRequest,
     SiteData,
     SiteListMeta,
@@ -63,6 +68,16 @@ def _client_ip(request: Request) -> str | None:
 
 def _etag(resource_id: UUID, version: int) -> str:
     return f'"{resource_id}:{version}"'
+
+
+def _next_due_at(cadence: str, now: datetime) -> datetime:
+    if cadence == "weekly":
+        return now + timedelta(days=7)
+    if cadence == "fortnightly":
+        return now + timedelta(days=14)
+    year = now.year + (now.month == 12)
+    month = 1 if now.month == 12 else now.month + 1
+    return now.replace(year=year, month=month, day=min(now.day, monthrange(year, month)[1]))
 
 
 def _expected_version(value: str | None, resource_id: UUID) -> int:
@@ -936,6 +951,151 @@ async def generate_site_grid(
     response.headers["ETag"] = _etag(site_id, expected + 1)
     response.headers["Location"] = f"/api/v1/sites/{site_id}/grids"
     return GridVersionResponse(data=GridVersionData.model_validate(created), meta=_meta(request))
+
+
+@router.get("/sites/{site_id}/schedule", response_model=ScheduleResponse)
+async def get_site_schedule(
+    site_id: UUID,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> ScheduleResponse:
+    visibility, visibility_params = _visibility_sql(principal)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        schedule = await (
+            await connection.execute(
+                "SELECT id,site_id,cadence,sensor_settings,quality_settings,next_due_at,status,scheduling_version,changed_by,created_at,updated_at FROM monitoring_schedules WHERE site_id=%s AND status<>'archived'",
+                (site_id,),
+            )
+        ).fetchone()
+    if not schedule:
+        raise ApiError(
+            404,
+            "schedule_not_found",
+            "Schedule not found",
+            "This site does not have a monitoring schedule yet.",
+        )
+    response.headers["ETag"] = _etag(schedule["id"], schedule["scheduling_version"])
+    return ScheduleResponse(data=ScheduleData.model_validate(schedule), meta=_meta(request))
+
+
+@router.put("/sites/{site_id}/schedule", response_model=ScheduleResponse, status_code=200)
+async def put_site_schedule(
+    site_id: UUID,
+    payload: ScheduleUpsertRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(current_principal)],
+    if_match: Annotated[str | None, Header()] = None,
+) -> ScheduleResponse:
+    _require_management(principal)
+    visibility, visibility_params = _visibility_sql(principal)
+    now = datetime.now(UTC)
+    due_at = _next_due_at(payload.cadence, now)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params, lock=True)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        current = await (
+            await connection.execute(
+                "SELECT id,cadence,sensor_settings,quality_settings,next_due_at,status,scheduling_version,changed_by FROM monitoring_schedules WHERE site_id=%s AND status<>'archived' FOR UPDATE",
+                (site_id,),
+            )
+        ).fetchone()
+        if current and current["status"] == "suspended":
+            raise ApiError(
+                409,
+                "schedule_suspended",
+                "Schedule is suspended",
+                "Resume the schedule before replacing its active settings.",
+            )
+        if current:
+            expected = _expected_version(if_match, current["id"])
+            if current["scheduling_version"] != expected:
+                raise ApiError(
+                    409,
+                    "version_conflict",
+                    "Resource version conflict",
+                    "The schedule was changed after it was loaded.",
+                    {"ETag": _etag(current["id"], current["scheduling_version"])},
+                )
+            schedule = await (
+                await connection.execute(
+                    """UPDATE monitoring_schedules SET cadence=%s,sensor_settings=%s,quality_settings=%s,next_due_at=%s,scheduling_version=scheduling_version+1,changed_by=%s,updated_at=now() WHERE id=%s RETURNING id,site_id,cadence,sensor_settings,quality_settings,next_due_at,status,scheduling_version,changed_by,created_at,updated_at""",
+                    (
+                        payload.cadence,
+                        Jsonb(payload.sensor_settings),
+                        Jsonb(payload.quality_settings),
+                        due_at,
+                        principal.user_id,
+                        current["id"],
+                    ),
+                )
+            ).fetchone()
+            before = {
+                "cadence": current["cadence"],
+                "sensor_settings": current["sensor_settings"],
+                "quality_settings": current["quality_settings"],
+                "next_due_at": current["next_due_at"].isoformat(),
+            }
+            action = "schedule.updated"
+        else:
+            if if_match is not None:
+                raise ApiError(
+                    400,
+                    "invalid_if_match",
+                    "Invalid update precondition",
+                    "A schedule does not exist yet, so omit If-Match when creating one.",
+                )
+            schedule = await (
+                await connection.execute(
+                    """INSERT INTO monitoring_schedules(organisation_id,site_id,cadence,sensor_settings,quality_settings,next_due_at,changed_by) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id,site_id,cadence,sensor_settings,quality_settings,next_due_at,status,scheduling_version,changed_by,created_at,updated_at""",
+                    (
+                        principal.organisation_id,
+                        site_id,
+                        payload.cadence,
+                        Jsonb(payload.sensor_settings),
+                        Jsonb(payload.quality_settings),
+                        due_at,
+                        principal.user_id,
+                    ),
+                )
+            ).fetchone()
+            before = None
+            action = "schedule.created"
+        await record_audit(
+            connection,
+            organisation_id=principal.organisation_id,
+            actor_id=principal.user_id,
+            action=action,
+            target_type="monitoring_schedule",
+            target_id=schedule["id"],
+            before=before,
+            after={
+                "cadence": schedule["cadence"],
+                "sensor_settings": schedule["sensor_settings"],
+                "quality_settings": schedule["quality_settings"],
+                "next_due_at": schedule["next_due_at"].isoformat(),
+                "status": schedule["status"],
+                "scheduling_version": schedule["scheduling_version"],
+            },
+            ip_address=_client_ip(request),
+        )
+    response.headers["ETag"] = _etag(schedule["id"], schedule["scheduling_version"])
+    return ScheduleResponse(data=ScheduleData.model_validate(schedule), meta=_meta(request))
 
 
 @router.get("/sites/{site_id}/grid-cells", response_model=GridCellListResponse)
