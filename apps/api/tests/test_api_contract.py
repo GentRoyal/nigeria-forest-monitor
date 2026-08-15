@@ -109,3 +109,10 @@ def test_grid_read_batch_is_published() -> None:
     assert "get" in document["paths"]["/api/v1/sites/{site_id}/grid-cells"]
     cell = document["components"]["schemas"]["GridCellData"]["properties"]
     assert {"cell_key", "geometry", "area_sq_m"}.issubset(cell)
+
+
+def test_grid_generation_batch_is_published() -> None:
+    document = app.openapi()
+    assert "post" in document["paths"]["/api/v1/sites/{site_id}/grids/generate"]
+    request = document["components"]["schemas"]["GridGenerateRequest"]["properties"]
+    assert {"method", "resolution_metres", "clip_to_boundary", "creation_reason"}.issubset(request)

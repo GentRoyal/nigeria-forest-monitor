@@ -384,3 +384,73 @@ def test_grid_history_and_viewport_cell_queries() -> None:
         )
         assert second_page.status_code == 200
         assert second_page.json()["data"][0]["id"] != first_page.json()["data"][0]["id"]
+
+
+def test_square_grid_generation_is_versioned_and_immutable() -> None:
+    import asyncio
+
+    from psycopg.errors import ObjectNotInPrerequisiteState
+
+    from apps.api.app.db import tenant_connection
+
+    slug = f"generated-grid-{uuid4().hex}"
+    generator = {
+        "method": "square",
+        "resolution_metres": 5_000,
+        "clip_to_boundary": True,
+        "creation_reason": "Initial monitoring grid",
+        "processing_compatibility": "v1",
+    }
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {login(client)}"}
+        created = client.post("/api/v1/sites", headers=headers, json=site_payload(slug))
+        assert created.status_code == 201, created.text
+        site_id = created.json()["data"]["id"]
+        etag = created.headers["etag"]
+
+        missing = client.post(
+            f"/api/v1/sites/{site_id}/grids/generate", headers=headers, json=generator
+        )
+        assert missing.status_code == 428
+        generated = client.post(
+            f"/api/v1/sites/{site_id}/grids/generate",
+            headers={**headers, "If-Match": etag},
+            json=generator,
+        )
+        assert generated.status_code == 201, generated.text
+        first = generated.json()["data"]
+        assert first["version"] == 1
+        assert first["cell_count"] > 0
+        assert first["parameters"]["projection"] == "EPSG:6933"
+        assert first["is_current"] is True
+        first_grid_id = first["id"]
+        updated_etag = generated.headers["etag"]
+
+        cells = client.get(
+            f"/api/v1/sites/{site_id}/grid-cells",
+            headers=headers,
+            params={"grid_version_id": first_grid_id, "bbox": "2.9,7.9,3.2,8.2"},
+        )
+        assert cells.status_code == 200, cells.text
+        assert cells.json()["data"]
+
+        second = client.post(
+            f"/api/v1/sites/{site_id}/grids/generate",
+            headers={**headers, "If-Match": updated_etag},
+            json={**generator, "resolution_metres": 2_500, "creation_reason": "Higher detail grid"},
+        )
+        assert second.status_code == 201, second.text
+        assert second.json()["data"]["version"] == 2
+        history = client.get(f"/api/v1/sites/{site_id}/grids", headers=headers)
+        assert [grid["version"] for grid in history.json()["data"]] == [2, 1]
+        assert history.json()["data"][0]["is_current"] is True
+        assert history.json()["data"][1]["superseded_at"] is not None
+
+    async def mutate_grid() -> None:
+        async with tenant_connection(ORGANISATION_ID, OWNER_ID) as connection:
+            await connection.execute(
+                "UPDATE grid_versions SET resolution_metres=999 WHERE id=%s", (first_grid_id,)
+            )
+
+    with pytest.raises(ObjectNotInPrerequisiteState):
+        asyncio.run(mutate_grid())

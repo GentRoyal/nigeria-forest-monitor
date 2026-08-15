@@ -177,6 +177,26 @@ class GridVersionListResponse(BaseModel):
     meta: GridVersionListMeta
 
 
+class GridGenerateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["square"] = "square"
+    resolution_metres: float = Field(ge=50, le=10_000)
+    clip_to_boundary: bool = True
+    creation_reason: str = Field(min_length=3, max_length=500)
+    processing_compatibility: str = Field(min_length=1, max_length=120)
+
+    @field_validator("creation_reason", "processing_compatibility")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class GridVersionResponse(BaseModel):
+    data: GridVersionData
+    meta: ResponseMeta
+
+
 class GridCellData(BaseModel):
     id: UUID
     grid_version_id: UUID

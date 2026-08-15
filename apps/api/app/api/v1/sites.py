@@ -18,9 +18,11 @@ from ...schemas.sites import (
     GridCellData,
     GridCellListMeta,
     GridCellListResponse,
+    GridGenerateRequest,
     GridVersionData,
     GridVersionListMeta,
     GridVersionListResponse,
+    GridVersionResponse,
     SiteCreateRequest,
     SiteData,
     SiteListMeta,
@@ -767,6 +769,173 @@ async def list_site_grids(
             request_id=UUID(request.state.request_id), next_cursor=next_cursor
         ),
     )
+
+
+@router.post("/sites/{site_id}/grids/generate", response_model=GridVersionResponse, status_code=201)
+async def generate_site_grid(
+    site_id: UUID,
+    payload: GridGenerateRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(current_principal)],
+    if_match: Annotated[str | None, Header()] = None,
+) -> GridVersionResponse:
+    _require_management(principal)
+    expected = _expected_version(if_match, site_id)
+    visibility, visibility_params = _visibility_sql(principal)
+    settings = get_settings()
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params, lock=True)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        if site["version"] != expected:
+            raise ApiError(
+                409,
+                "version_conflict",
+                "Resource version conflict",
+                "The site was changed after it was loaded.",
+                {"ETag": _etag(site_id, site["version"])},
+            )
+        if not site["boundary_id"]:
+            raise ApiError(
+                409,
+                "boundary_not_available",
+                "Boundary is not available",
+                "A site needs a current boundary before a grid can be generated.",
+            )
+        count = await (
+            await connection.execute(
+                """WITH boundary AS (
+                  SELECT ST_Transform(geometry,6933) geometry FROM site_boundary_versions WHERE id=%s
+                ), squares AS (
+                  SELECT sq.geom,sq.i,sq.j,b.geometry boundary
+                  FROM boundary b CROSS JOIN LATERAL ST_SquareGrid(%s,ST_Envelope(b.geometry)) sq
+                  WHERE ST_Intersects(sq.geom,b.geometry)
+                ), pieces AS (
+                  SELECT i,j,d.geom FROM squares
+                  CROSS JOIN LATERAL ST_Dump(CASE WHEN %s THEN ST_CollectionExtract(ST_Intersection(geom,boundary),3) ELSE geom END) d
+                ) SELECT count(*) cell_count FROM pieces WHERE ST_Area(geom)>0""",
+                (site["boundary_id"], payload.resolution_metres, payload.clip_to_boundary),
+            )
+        ).fetchone()
+        cell_count = int(count["cell_count"])
+        if cell_count == 0:
+            raise ApiError(
+                422,
+                "grid_empty",
+                "Grid has no cells",
+                "The current boundary produced no usable grid cells at this resolution.",
+            )
+        if cell_count > settings.max_grid_cells:
+            raise ApiError(
+                422,
+                "grid_too_large",
+                "Grid exceeds cell limit",
+                f"This request would create {cell_count} cells; the configured limit is {settings.max_grid_cells}.",
+            )
+        next_version = int(
+            (
+                await (
+                    await connection.execute(
+                        "SELECT COALESCE(max(version),0)+1 version FROM grid_versions WHERE site_id=%s",
+                        (site_id,),
+                    )
+                ).fetchone()
+            )["version"]
+        )
+        if site["current_grid_version_id"]:
+            await connection.execute(
+                "UPDATE grid_versions SET superseded_at=now() WHERE id=%s",
+                (site["current_grid_version_id"],),
+            )
+        try:
+            grid = await (
+                await connection.execute(
+                    """INSERT INTO grid_versions(organisation_id,site_id,version,method,resolution_metres,parameters,creation_reason,processing_compatibility)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (
+                        principal.organisation_id,
+                        site_id,
+                        next_version,
+                        payload.method,
+                        payload.resolution_metres,
+                        Jsonb(
+                            {
+                                "clip_to_boundary": payload.clip_to_boundary,
+                                "projection": "EPSG:6933",
+                                "cell_key_scheme": "SQ-i-j-part",
+                            }
+                        ),
+                        payload.creation_reason,
+                        payload.processing_compatibility,
+                    ),
+                )
+            ).fetchone()
+        except UniqueViolation as error:
+            raise ApiError(
+                409,
+                "grid_version_conflict",
+                "Grid version conflict",
+                "Another grid version was created concurrently.",
+            ) from error
+        await connection.execute(
+            """WITH boundary AS (
+              SELECT ST_Transform(geometry,6933) geometry FROM site_boundary_versions WHERE id=%s
+            ), squares AS (
+              SELECT sq.geom,sq.i,sq.j,b.geometry boundary
+              FROM boundary b CROSS JOIN LATERAL ST_SquareGrid(%s,ST_Envelope(b.geometry)) sq
+              WHERE ST_Intersects(sq.geom,b.geometry)
+            ), pieces AS (
+              SELECT i,j,d.path,d.geom FROM squares
+              CROSS JOIN LATERAL ST_Dump(CASE WHEN %s THEN ST_CollectionExtract(ST_Intersection(geom,boundary),3) ELSE geom END) d
+            ) INSERT INTO grid_cells(organisation_id,grid_version_id,cell_key,display_label,geometry,area_sq_m)
+            SELECT %s,%s,format('SQ-%%s-%%s-%%s',i,j,COALESCE(path[1],1)),
+              format('Square %%s,%%s',i,j),ST_Transform(geom,4326),ST_Area(geom)
+            FROM pieces WHERE ST_Area(geom)>0""",
+            (
+                site["boundary_id"],
+                payload.resolution_metres,
+                payload.clip_to_boundary,
+                principal.organisation_id,
+                grid["id"],
+            ),
+        )
+        await connection.execute(
+            "UPDATE sites SET current_grid_version_id=%s,version=version+1,updated_at=now() WHERE id=%s",
+            (grid["id"], site_id),
+        )
+        await record_audit(
+            connection,
+            organisation_id=principal.organisation_id,
+            actor_id=principal.user_id,
+            action="site.grid_generated",
+            target_type="grid_version",
+            target_id=grid["id"],
+            after={
+                "site_id": str(site_id),
+                "version": next_version,
+                "method": payload.method,
+                "resolution_metres": payload.resolution_metres,
+                "cell_count": cell_count,
+                "clip_to_boundary": payload.clip_to_boundary,
+            },
+            reason=payload.creation_reason,
+            ip_address=_client_ip(request),
+        )
+        created = await (
+            await connection.execute(
+                """SELECT g.id,g.version,g.method,g.resolution_metres,g.parameters,g.creation_reason,g.processing_compatibility,g.superseded_at,g.created_at,TRUE is_current,(SELECT count(*) FROM grid_cells c WHERE c.grid_version_id=g.id) cell_count FROM grid_versions g WHERE g.id=%s""",
+                (grid["id"],),
+            )
+        ).fetchone()
+    response.headers["ETag"] = _etag(site_id, expected + 1)
+    response.headers["Location"] = f"/api/v1/sites/{site_id}/grids"
+    return GridVersionResponse(data=GridVersionData.model_validate(created), meta=_meta(request))
 
 
 @router.get("/sites/{site_id}/grid-cells", response_model=GridCellListResponse)

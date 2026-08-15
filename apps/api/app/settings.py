@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     password_reset_minutes: int = 30
     max_aoi_area_sq_km: float = Field(default=2_000_000, gt=0)
     max_aoi_vertices: int = Field(default=100_000, ge=4, le=1_000_000)
+    max_grid_cells: int = Field(default=100_000, ge=1_000, le=1_000_000)
     password_pepper: str = "local-development-pepper-change-me"
     refresh_cookie_name: str = "nfm_refresh_token"
     csrf_cookie_name: str = "nfm_csrf_token"
