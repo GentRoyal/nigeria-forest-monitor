@@ -158,3 +158,23 @@ def test_observation_and_event_review_batch_is_published() -> None:
     assert "post" in document["paths"]["/api/v1/events/{event_id}/transitions"]
     review = document["components"]["schemas"]["ReviewCreateRequest"]["properties"]
     assert {"review_type", "decision", "supporting_evidence_ids"}.issubset(review)
+
+
+def test_event_coordination_batch_is_published() -> None:
+    document = app.openapi()
+    assignment_path = document["paths"]["/api/v1/events/{event_id}/assignments"]
+    assert {"get", "post"}.issubset(assignment_path)
+    assert "post" in document["paths"]["/api/v1/events/{event_id}/assignments/{assignment_id}/accept"]
+    assert "post" in document["paths"]["/api/v1/events/{event_id}/assignments/{assignment_id}/decline"]
+    assert "post" in document["paths"]["/api/v1/events/{event_id}/assignments/{assignment_id}/cancel"]
+    assert {"get", "post"}.issubset(document["paths"]["/api/v1/events/{event_id}/evidence"])
+    assert {"get", "post"}.issubset(document["paths"]["/api/v1/events/{event_id}/comments"])
+
+
+def test_internal_worker_lease_batch_is_published() -> None:
+    document = app.openapi()
+    path = document["paths"]["/internal/v1/jobs/{job_id}/claim"]
+    assert "post" in path
+    assert "post" in document["paths"]["/internal/v1/jobs/{job_id}/heartbeat"]
+    assert "post" in document["paths"]["/internal/v1/jobs/{job_id}/stages"]
+    assert "post" in document["paths"]["/internal/v1/jobs/{job_id}/fail"]

@@ -688,3 +688,84 @@ def test_privileged_job_listing_and_detail() -> None:
             assert client.get(f"/api/v1/jobs/{job_id}").status_code == 403
         finally:
             app.dependency_overrides.clear()
+
+
+def test_worker_claim_and_heartbeat_require_service_and_lease_credentials() -> None:
+    slug = f"worker-lease-{uuid4().hex}"
+    with TestClient(app) as client:
+        user_headers = {"Authorization": f"Bearer {login(client)}"}
+        site = client.post("/api/v1/sites", headers=user_headers, json=site_payload(slug))
+        assert site.status_code == 201
+        job = client.post(
+            f"/api/v1/sites/{site.json()['data']['id']}/jobs",
+            headers={**user_headers, "Idempotency-Key": f"worker-lease-{uuid4().hex}"},
+            json={"job_type": "discovery"},
+        )
+        assert job.status_code == 201, job.text
+        job_id = job.json()["data"]["id"]
+        worker_headers = {
+            "X-Organisation-ID": str(ORGANISATION_ID),
+            "X-Worker-Token": "local-development-worker-token-change-me",
+        }
+        rejected = client.post(
+            f"/internal/v1/jobs/{job_id}/claim",
+            headers={"X-Organisation-ID": str(ORGANISATION_ID), "X-Worker-Token": "wrong"},
+            json={"worker_identity": "integration-worker"},
+        )
+        assert rejected.status_code == 401
+        claim = client.post(
+            f"/internal/v1/jobs/{job_id}/claim",
+            headers=worker_headers,
+            json={"worker_identity": "integration-worker", "lease_seconds": 120},
+        )
+        assert claim.status_code == 200, claim.text
+        claim_data = claim.json()["data"]
+        assert claim_data["job"]["status"] == "running"
+        assert claim_data["job"]["attempt_count"] == 1
+        assert claim_data["lease_token"]
+        duplicate = client.post(
+            f"/internal/v1/jobs/{job_id}/claim",
+            headers=worker_headers,
+            json={"worker_identity": "other-worker"},
+        )
+        assert duplicate.status_code == 409
+        heartbeat = client.post(
+            f"/internal/v1/jobs/{job_id}/heartbeat",
+            headers={**worker_headers, "X-Job-Lease-Token": claim_data["lease_token"]},
+            json={"progress": 45, "stage": "processing"},
+        )
+        assert heartbeat.status_code == 200, heartbeat.text
+        assert heartbeat.json()["data"]["progress"] == 45
+        assert heartbeat.json()["data"]["current_stage"] == "processing"
+        stage_headers = {
+            **worker_headers,
+            "X-Job-Lease-Token": claim_data["lease_token"],
+            "Idempotency-Key": f"stage-{uuid4().hex}",
+        }
+        stage = client.post(
+            f"/internal/v1/jobs/{job_id}/stages",
+            headers=stage_headers,
+            json={"stage": "publishing", "details": {"asset_count": 2}},
+        )
+        assert stage.status_code == 201, stage.text
+        assert stage.json()["data"]["stage"] == "publishing"
+        replay = client.post(
+            f"/internal/v1/jobs/{job_id}/stages",
+            headers=stage_headers,
+            json={"stage": "publishing", "details": {"asset_count": 2}},
+        )
+        assert replay.status_code == 200
+        assert replay.json()["data"]["id"] == stage.json()["data"]["id"]
+        bad_lease = client.post(
+            f"/internal/v1/jobs/{job_id}/heartbeat",
+            headers={**worker_headers, "X-Job-Lease-Token": "not-the-current-lease"},
+            json={"progress": 46},
+        )
+        assert bad_lease.status_code == 409
+        failed = client.post(
+            f"/internal/v1/jobs/{job_id}/fail",
+            headers={**worker_headers, "X-Job-Lease-Token": claim_data["lease_token"]},
+            json={"category": "temporary_provider_failure", "message": "Provider timed out", "retryable": True},
+        )
+        assert failed.status_code == 200, failed.text
+        assert failed.json()["data"]["status"] == "retry_wait"

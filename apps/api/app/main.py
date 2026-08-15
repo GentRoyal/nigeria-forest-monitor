@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.errors import register_error_handlers
+from .api.internal import router as internal_router
 from .api.middleware import RequestContextMiddleware, configure_logging
 from .api.v1.router import router as v1_router
 from .database import database_is_ready
@@ -31,6 +32,7 @@ app.add_middleware(
 app.add_middleware(RequestContextMiddleware)
 register_error_handlers(app)
 app.include_router(v1_router)
+app.include_router(internal_router)
 
 
 @app.get("/health/live", tags=["health"])

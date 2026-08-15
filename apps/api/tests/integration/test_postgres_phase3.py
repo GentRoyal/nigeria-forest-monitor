@@ -168,7 +168,7 @@ def workspaces() -> dict[str, tuple[UUID, UUID, UUID]]:
         with connect() as connection:
             connection.execute("SELECT PostGIS_Version()").fetchone()
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            if not revision or revision[0] != "0011_job_retry_lineage":
+            if not revision or revision[0] != "0016_notify_dedupe":
                 pytest.skip("current database migrations are not applied")
     except psycopg.OperationalError:
         pytest.skip("local PostgreSQL is unavailable")

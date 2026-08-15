@@ -10,6 +10,18 @@ from ...schemas.sites import (
     ChangeEventListMeta,
     ChangeEventListResponse,
     ChangeEventResponse,
+    EventAssignmentCreateRequest,
+    EventAssignmentData,
+    EventAssignmentListResponse,
+    EventAssignmentResponse,
+    EventCommentCreateRequest,
+    EventCommentData,
+    EventCommentListResponse,
+    EventCommentResponse,
+    EventEvidenceCreateRequest,
+    EventEvidenceData,
+    EventEvidenceListResponse,
+    EventEvidenceResponse,
     EventTransitionRequest,
     ReviewCreateRequest,
     ReviewData,
@@ -24,6 +36,7 @@ from ...security.cursors import (
     decode_cursor,
     encode_cursor,
 )
+from ...security.notifications import notify_event_subscribers
 from ...security.permissions import Action, Role, is_allowed
 from ..dependencies import Principal, current_principal
 from ..errors import ApiError
@@ -40,6 +53,15 @@ _REVIEW_COLUMNS = """
   id,event_id,review_type,decision,rationale,confidence_statement,actor_id,
   supporting_evidence supporting_evidence_ids,supersedes_review_id,submitted_at
 """
+_ASSIGNMENT_COLUMNS = """
+  id,event_id,assignee_id,assigned_by,assignment_type,due_at,accepted_at,
+  completed_at,status,created_at
+"""
+_EVIDENCE_COLUMNS = """
+  id,event_id,evidence_type,source,collected_by,collected_at,access_classification,
+  checksum,object_key,provenance,created_at
+"""
+_COMMENT_COLUMNS = "id,event_id,author_id,body,created_at,edited_at"
 
 
 def _meta(request: Request, *, next_cursor: str | None = None) -> ChangeEventListMeta:
@@ -203,3 +225,187 @@ async def transition_event(
             after={"review_status": payload.to_status, "review_id": str(payload.review_id) if payload.review_id else None},
             reason=payload.reason)
     return ChangeEventResponse(data=ChangeEventData.model_validate(updated), meta=_meta(request))
+
+
+def _require_assignment_management(principal: Principal) -> None:
+    if principal.role not in {Role.OWNER, Role.ADMINISTRATOR}:
+        raise ApiError(403, "permission_denied", "Permission denied", "Your role cannot manage event assignments.")
+
+
+@router.get("/events/{event_id}/assignments", response_model=EventAssignmentListResponse)
+async def list_assignments(event_id: UUID, request: Request, principal: Annotated[Principal, Depends(current_principal)]) -> EventAssignmentListResponse:
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        if not await _find_event(connection, principal, event_id):
+            raise ApiError(404, "event_not_found", "Event not found", "The event does not exist or is unavailable.")
+        rows = await (await connection.execute(
+            f"SELECT {_ASSIGNMENT_COLUMNS} FROM event_assignments WHERE event_id=%s ORDER BY created_at DESC,id DESC",
+            (event_id,),
+        )).fetchall()
+    return EventAssignmentListResponse(data=[EventAssignmentData.model_validate(row) for row in rows], meta=_meta(request))
+
+
+@router.post("/events/{event_id}/assignments", response_model=EventAssignmentResponse, status_code=201)
+async def create_assignment(
+    event_id: UUID, payload: EventAssignmentCreateRequest, request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> EventAssignmentResponse:
+    _require_assignment_management(principal)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        if not await _find_event(connection, principal, event_id, lock=True):
+            raise ApiError(404, "event_not_found", "Event not found", "The event does not exist or is unavailable.")
+        assignee = await (await connection.execute(
+            "SELECT role,status FROM user_profiles WHERE id=%s", (payload.assignee_id,)
+        )).fetchone()
+        if not assignee or assignee["status"] != "active":
+            raise ApiError(422, "invalid_assignee", "Invalid assignee", "The assignee must be an active organisation member.")
+        required_role = Role.VERIFICATION_OFFICER if payload.assignment_type == "institutional_verification" else Role.ANALYST
+        if assignee["role"] != required_role:
+            raise ApiError(422, "invalid_assignee_role", "Invalid assignee role", f"This assignment requires a {required_role.value}.")
+        active = await (await connection.execute(
+            """SELECT id FROM event_assignments WHERE event_id=%s AND assignee_id=%s
+            AND assignment_type=%s AND status IN ('pending','accepted')""",
+            (event_id, payload.assignee_id, payload.assignment_type),
+        )).fetchone()
+        if active:
+            raise ApiError(409, "assignment_already_active", "Assignment already active", "This assignee already has an active assignment of this type.")
+        assignment = await (await connection.execute(
+            f"""INSERT INTO event_assignments(organisation_id,event_id,assignee_id,assigned_by,assignment_type,due_at)
+            VALUES (%s,%s,%s,%s,%s,%s) RETURNING {_ASSIGNMENT_COLUMNS}""",
+            (principal.organisation_id, event_id, payload.assignee_id, principal.user_id, payload.assignment_type, payload.due_at),
+        )).fetchone()
+        await record_audit(connection, organisation_id=principal.organisation_id, actor_id=principal.user_id,
+            action="change_event.assignment_created", target_type="change_event", target_id=event_id,
+            after={"assignment_id": str(assignment["id"]), "assignee_id": str(payload.assignee_id), "assignment_type": payload.assignment_type})
+        await notify_event_subscribers(
+            connection, organisation_id=principal.organisation_id, site_id=(await _find_event(connection, principal, event_id))["site_id"],
+            event_id=event_id, notification_type="change_event_assigned", safe_summary="You have been assigned a forest change review.",
+            sensitivity="normal", protected_path=f"/events/{event_id}", explicit_recipient_id=payload.assignee_id,
+        )
+    return EventAssignmentResponse(data=EventAssignmentData.model_validate(assignment), meta=_meta(request))
+
+
+async def _respond_to_assignment(
+    event_id: UUID, assignment_id: UUID, status: str, request: Request, principal: Principal
+) -> EventAssignmentResponse:
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        assignment = await (await connection.execute(
+            f"SELECT {_ASSIGNMENT_COLUMNS} FROM event_assignments WHERE id=%s AND event_id=%s FOR UPDATE",
+            (assignment_id, event_id),
+        )).fetchone()
+        if not assignment:
+            raise ApiError(404, "assignment_not_found", "Assignment not found", "The assignment does not exist or is unavailable.")
+        if assignment["assignee_id"] != principal.user_id:
+            raise ApiError(403, "permission_denied", "Permission denied", "Only the assigned member can respond to this assignment.")
+        if assignment["status"] != "pending":
+            raise ApiError(409, "assignment_not_pending", "Assignment is not pending", "Only pending assignments can be accepted or declined.")
+        updated = await (await connection.execute(
+            f"""UPDATE event_assignments SET status=%s,
+            accepted_at=CASE WHEN %s='accepted' THEN now() ELSE accepted_at END,
+            completed_at=CASE WHEN %s='declined' THEN now() ELSE completed_at END
+            WHERE id=%s RETURNING {_ASSIGNMENT_COLUMNS}""",
+            (status, status, status, assignment_id),
+        )).fetchone()
+        await record_audit(connection, organisation_id=principal.organisation_id, actor_id=principal.user_id,
+            action=f"change_event.assignment_{status}", target_type="change_event", target_id=event_id,
+            after={"assignment_id": str(assignment_id)})
+    return EventAssignmentResponse(data=EventAssignmentData.model_validate(updated), meta=_meta(request))
+
+
+@router.post("/events/{event_id}/assignments/{assignment_id}/accept", response_model=EventAssignmentResponse)
+async def accept_assignment(event_id: UUID, assignment_id: UUID, request: Request, principal: Annotated[Principal, Depends(current_principal)]) -> EventAssignmentResponse:
+    return await _respond_to_assignment(event_id, assignment_id, "accepted", request, principal)
+
+
+@router.post("/events/{event_id}/assignments/{assignment_id}/decline", response_model=EventAssignmentResponse)
+async def decline_assignment(event_id: UUID, assignment_id: UUID, request: Request, principal: Annotated[Principal, Depends(current_principal)]) -> EventAssignmentResponse:
+    return await _respond_to_assignment(event_id, assignment_id, "declined", request, principal)
+
+
+@router.post("/events/{event_id}/assignments/{assignment_id}/cancel", response_model=EventAssignmentResponse)
+async def cancel_assignment(event_id: UUID, assignment_id: UUID, request: Request, principal: Annotated[Principal, Depends(current_principal)]) -> EventAssignmentResponse:
+    _require_assignment_management(principal)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        assignment = await (await connection.execute(
+            f"SELECT {_ASSIGNMENT_COLUMNS} FROM event_assignments WHERE id=%s AND event_id=%s FOR UPDATE",
+            (assignment_id, event_id),
+        )).fetchone()
+        if not assignment:
+            raise ApiError(404, "assignment_not_found", "Assignment not found", "The assignment does not exist or is unavailable.")
+        if assignment["status"] not in {"pending", "accepted"}:
+            raise ApiError(409, "assignment_not_cancellable", "Assignment cannot be cancelled", "Only pending or accepted assignments can be cancelled.")
+        updated = await (await connection.execute(
+            f"UPDATE event_assignments SET status='cancelled',completed_at=now() WHERE id=%s RETURNING {_ASSIGNMENT_COLUMNS}", (assignment_id,)
+        )).fetchone()
+        await record_audit(connection, organisation_id=principal.organisation_id, actor_id=principal.user_id,
+            action="change_event.assignment_cancelled", target_type="change_event", target_id=event_id,
+            after={"assignment_id": str(assignment_id)})
+    return EventAssignmentResponse(data=EventAssignmentData.model_validate(updated), meta=_meta(request))
+
+
+def _can_add_event_material(principal: Principal) -> bool:
+    return is_allowed(principal.role, Action.REMOTE_REVIEW) or is_allowed(
+        principal.role, Action.INSTITUTIONAL_VERIFY
+    )
+
+
+@router.get("/events/{event_id}/evidence", response_model=EventEvidenceListResponse)
+async def list_evidence(event_id: UUID, request: Request, principal: Annotated[Principal, Depends(current_principal)]) -> EventEvidenceListResponse:
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        if not await _find_event(connection, principal, event_id):
+            raise ApiError(404, "event_not_found", "Event not found", "The event does not exist or is unavailable.")
+        rows = await (await connection.execute(
+            f"SELECT {_EVIDENCE_COLUMNS} FROM event_evidence WHERE event_id=%s ORDER BY collected_at DESC,id DESC", (event_id,)
+        )).fetchall()
+    return EventEvidenceListResponse(data=[EventEvidenceData.model_validate(row) for row in rows], meta=_meta(request))
+
+
+@router.post("/events/{event_id}/evidence", response_model=EventEvidenceResponse, status_code=201)
+async def create_evidence(
+    event_id: UUID, payload: EventEvidenceCreateRequest, request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> EventEvidenceResponse:
+    if not _can_add_event_material(principal):
+        raise ApiError(403, "permission_denied", "Permission denied", "Your role cannot register event evidence.")
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        if not await _find_event(connection, principal, event_id, lock=True):
+            raise ApiError(404, "event_not_found", "Event not found", "The event does not exist or is unavailable.")
+        evidence = await (await connection.execute(
+            f"""INSERT INTO event_evidence(organisation_id,event_id,evidence_type,source,collected_by,collected_at,access_classification,checksum,object_key,provenance)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING {_EVIDENCE_COLUMNS}""",
+            (principal.organisation_id, event_id, payload.evidence_type, payload.source, principal.user_id,
+             payload.collected_at, payload.access_classification, payload.checksum, payload.object_key, Jsonb(payload.provenance)),
+        )).fetchone()
+        await record_audit(connection, organisation_id=principal.organisation_id, actor_id=principal.user_id,
+            action="change_event.evidence_registered", target_type="change_event", target_id=event_id,
+            after={"evidence_id": str(evidence["id"]), "evidence_type": payload.evidence_type})
+    return EventEvidenceResponse(data=EventEvidenceData.model_validate(evidence), meta=_meta(request))
+
+
+@router.get("/events/{event_id}/comments", response_model=EventCommentListResponse)
+async def list_comments(event_id: UUID, request: Request, principal: Annotated[Principal, Depends(current_principal)]) -> EventCommentListResponse:
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        if not await _find_event(connection, principal, event_id):
+            raise ApiError(404, "event_not_found", "Event not found", "The event does not exist or is unavailable.")
+        rows = await (await connection.execute(
+            f"SELECT {_COMMENT_COLUMNS} FROM event_comments WHERE event_id=%s ORDER BY created_at,id", (event_id,)
+        )).fetchall()
+    return EventCommentListResponse(data=[EventCommentData.model_validate(row) for row in rows], meta=_meta(request))
+
+
+@router.post("/events/{event_id}/comments", response_model=EventCommentResponse, status_code=201)
+async def create_comment(
+    event_id: UUID, payload: EventCommentCreateRequest, request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> EventCommentResponse:
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        if not await _find_event(connection, principal, event_id, lock=True):
+            raise ApiError(404, "event_not_found", "Event not found", "The event does not exist or is unavailable.")
+        comment = await (await connection.execute(
+            f"""INSERT INTO event_comments(organisation_id,event_id,author_id,body)
+            VALUES (%s,%s,%s,%s) RETURNING {_COMMENT_COLUMNS}""",
+            (principal.organisation_id, event_id, principal.user_id, payload.body),
+        )).fetchone()
+        await record_audit(connection, organisation_id=principal.organisation_id, actor_id=principal.user_id,
+            action="change_event.comment_added", target_type="change_event", target_id=event_id,
+            after={"comment_id": str(comment["id"]), "body_length": len(payload.body)})
+    return EventCommentResponse(data=EventCommentData.model_validate(comment), meta=_meta(request))

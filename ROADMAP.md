@@ -140,27 +140,48 @@ analytical tests still pass.
 queries return the correct grid cells for a site or viewport. Role permissions,
 invitations, audit history, and deletion rules are verified automatically.
 
-## Phase 4 — FastAPI backend **Current**
+## Phase 4 — FastAPI backend **In progress**
 
-- [ ] Add configuration, structured logging, health checks, and API versioning.
-- [ ] Verify locally issued access tokens and organisation membership.
-- [ ] Implement organisation, membership, invitation, and profile endpoints.
-- [ ] Implement site CRUD, AOI validation, ownership, tags, search, saved filters,
-  and grid generation/import.
-- [ ] Implement schedules, observations, events, assignments, reviews, notes,
-  evidence, and site timeline endpoints.
-- [ ] Implement job create, claim, heartbeat, complete, retry, and cancel APIs.
+- [x] Add local configuration, structured request logging, health checks, error
+  envelopes, and `/api/v1` versioning.
+- [x] Verify locally issued access tokens, active sessions, organisation membership,
+  and current role on every product request.
+- [x] Implement organisation, department, team, membership, invitation, session,
+  and profile endpoints.
+- [x] Implement site CRUD, AOI validation, ownership, tags, search, immutable
+  boundary versions, grid history, map-cell queries, and grid generation.
+- [x] Implement monitoring schedules and lifecycle controls.
+- [x] Implement observation history/detail reads and a role-filtered event queue.
+- [x] Implement event reviews, transitions, assignments, evidence metadata, and
+  auditable comments; verification officers see only specifically assigned events.
+- [x] Implement manual jobs, privileged job visibility, idempotent retries, and
+  cancellation.
+- [x] Implement separate worker authentication plus claim, lease, heartbeat, stage,
+  completion, and failure callbacks; workers never use interactive user credentials.
+- [x] Publish catalogue items, observations, processing-run provenance, raster assets,
+  and possible-change events from authenticated, lease-bound worker callbacks.
+- [ ] Complete the single-transaction publication path for a processing result:
+  processing run, assets, grid measurements, and change events must commit together
+  before the job can become completed.
+- [ ] Add a unified site timeline that combines observations, jobs, events, reviews,
+  assignments, and audit entries.
 - [ ] Issue controlled local asset upload/download references, preserving an interface
   that can later support signed object-storage URLs.
-- [ ] Implement notification preferences, subscriptions, exports, API keys, and
-  webhook management.
-- [ ] Add administration endpoints for failed jobs, reprocessing, quotas, and
-  operational audit queries.
-- [ ] Add cursor pagination, spatial/temporal filtering, idempotency keys,
-  optimistic concurrency, consistent errors, and OpenAPI examples.
+- [x] Implement recipient-scoped in-app notification reads, per-user notification
+  preferences, and authorised site/event subscriptions.
+- [x] Implement deduplicated, preference-aware notification fan-out for detected
+  change events and new assignments, with in-app/email local outbox records.
+- [ ] Implement external email sending, scheduled digest dispatch, exports, API
+  keys, and webhook management.
+- [x] Add the privileged operational audit query.
+- [ ] Add administration endpoints for failed jobs, reprocessing, and quotas.
+- [x] Add signed cursor pagination, idempotency keys, optimistic concurrency, and
+  consistent errors to the completed resource slices.
+- [ ] Add the remaining spatial/temporal filters and OpenAPI examples.
 - [ ] Version API contracts and publish a generated client for the frontend.
-- [ ] Add unit, integration, contract, authorization, concurrency, and spatial
-  API tests.
+- [x] Add unit, integration, contract, authorization, RLS, concurrency, and spatial
+  regression coverage for the completed slices.
+- [ ] Add end-to-end worker-callback and full human-review workflow coverage.
 
 **Done when:** The MVP workflow works through OpenAPI with authentication and
 organisation isolation, stable contracts, idempotent writes, and auditability.
@@ -169,14 +190,23 @@ organisation isolation, stable contracts, idempotent writes, and auditability.
 
 - [ ] Package the existing pipeline as an idempotent worker task.
 - [ ] Create per-site cadence, sensor, cloud-cover, baseline, and alert settings.
-- [ ] Add a scheduler that creates due work without duplicate jobs.
-- [ ] Discover new catalogue items incrementally and record discovery cursors.
+- [x] Add a fixed-cadence Airflow coordinator that creates duplicate-safe due
+  discovery jobs through the scheduler-only API.
+- [x] Add a parameterised Airflow STAC discovery DAG for the approved Planetary
+  Computer Sentinel-2 catalogue; it registers candidate source items through
+  lease-bound API callbacks.
+- [ ] Record per-schedule discovery cursors and use them for incremental rather
+  than fixed-window discovery.
 - [ ] Check AOI coverage, acquisition geometry, data quality, and duplicates before
   processing.
 - [ ] Expose site freshness, next scheduled run, last successful observation, and
   monitoring health.
-- [ ] Claim jobs and report heartbeat and progress.
-- [ ] Query free Sentinel-1, Sentinel-2, or Landsat through STAC.
+- [x] Claim jobs and report lease-protected heartbeat, progress, stage, failure, and
+  completion callbacks.
+- [x] Query free Sentinel-2 L2A candidates through the approved Planetary Computer
+  STAC API for an authorised site AOI.
+- [ ] Add Sentinel-1 and Landsat providers, asset signing, provider fallback, and
+  source-specific quality filtering.
 - [ ] Stream only the data needed for the selected AOI.
 - [ ] Run quality masking, preprocessing, and change detection.
 - [ ] Produce analysis-ready Cloud Optimized GeoTIFFs with overviews.
@@ -241,13 +271,18 @@ history without using the notebook or database console.
 
 ## Phase 8 — Alerts, collaboration, exports, and integrations
 
-- [ ] Add in-app notifications and unread state.
-- [ ] Add email notifications and scheduled digest delivery.
-- [ ] Add per-user and per-site subscriptions, severity thresholds, quiet hours,
-  deduplication, escalation, retry, and delivery history.
+- [x] Add recipient-scoped in-app notifications, unread filtering, and idempotent
+  read state.
+- [x] Add local email-outbox delivery records that respect user channel preferences.
+- [ ] Add external email-provider delivery and scheduled digest dispatch.
+- [x] Add per-user site/event subscriptions and notification channel/digest
+  preferences.
+- [x] Add notification deduplication and delivery-history records.
+- [ ] Add severity thresholds, quiet hours, escalation, and delivery retries.
 - [ ] Add signed outgoing webhooks with replay protection and a test action.
-- [ ] Add event acknowledgement, assignment, comments, mentions, and resolution
-  service-level targets.
+- [x] Add event assignment, acceptance/decline/cancellation, comments, and
+  resolution transitions to the API.
+- [ ] Add mentions and resolution service-level targets.
 - [ ] Export sites, grids, observations, and events as GeoJSON and CSV.
 - [ ] Generate a shareable PDF/HTML site or event report with provenance.
 - [ ] Permit authorized COG downloads and expose STAC/API access.

@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     access_token_secret: str = "local-development-signing-key-change-me"
     cursor_signing_secret: str = "local-development-cursor-key-change-me"
+    worker_service_token: str = "local-development-worker-token-change-me"
+    scheduler_service_token: str = "local-development-scheduler-token-change-me"
+    worker_lease_seconds: int = Field(default=300, ge=60, le=1800)
     access_token_minutes: int = 15
     jwt_leeway_seconds: int = Field(default=30, ge=0, le=300)
     refresh_token_days: int = 14

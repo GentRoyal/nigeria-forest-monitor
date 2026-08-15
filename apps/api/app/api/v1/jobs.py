@@ -236,3 +236,53 @@ async def retry_job(
             after={"retry_of_job_id": str(job_id), "priority": job["priority"]},
         )
     return JobResponse(data=JobData.model_validate(job), meta=_meta(request))
+
+
+@router.get("/admin/jobs/failed", response_model=JobListResponse)
+async def list_failed_jobs(
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> JobListResponse:
+    _require_job_observability(principal)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        rows = await (await connection.execute(
+            f"SELECT {_JOB_COLUMNS} FROM processing_jobs WHERE status IN ('failed','retry_wait') ORDER BY updated_at DESC,id DESC LIMIT %s",
+            (limit,),
+        )).fetchall()
+    return JobListResponse(data=[JobData.model_validate(row) for row in rows], meta=_meta(request))
+
+
+@router.post("/admin/jobs/{job_id}/reprocess", response_model=JobResponse, status_code=201)
+async def reprocess_job(
+    job_id: UUID,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(current_principal)],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=200)],
+) -> JobResponse:
+    _require_job_observability(principal)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        original = await (await connection.execute(
+            f"SELECT {_JOB_COLUMNS} FROM processing_jobs WHERE id=%s FOR UPDATE", (job_id,)
+        )).fetchone()
+        if not original:
+            raise ApiError(404, "job_not_found", "Job not found", "The job does not exist or is unavailable.")
+        key = hashlib.sha256(f"reprocess:{job_id}:{idempotency_key}".encode()).hexdigest()
+        existing = await (await connection.execute(
+            f"SELECT {_JOB_COLUMNS} FROM processing_jobs WHERE idempotency_key=%s", (key,)
+        )).fetchone()
+        if existing:
+            response.status_code = 200
+            return JobResponse(data=JobData.model_validate(existing), meta=_meta(request))
+        job = await (await connection.execute(
+            f"""INSERT INTO processing_jobs(organisation_id,site_id,observation_id,grid_version_id,retry_of_job_id,job_type,trigger_type,priority,idempotency_key,requested_configuration,requested_by)
+            SELECT organisation_id,site_id,observation_id,grid_version_id,id,'reprocessing','manual',priority,%s,
+              jsonb_set(requested_configuration,'{{reprocess_of_job_id}}',to_jsonb(id::text),true),%s
+            FROM processing_jobs WHERE id=%s RETURNING {_JOB_COLUMNS}""",
+            (key, principal.user_id, job_id),
+        )).fetchone()
+        await record_audit(connection, organisation_id=principal.organisation_id, actor_id=principal.user_id,
+            action="processing_job.reprocessing_requested", target_type="processing_job", target_id=job["id"],
+            after={"reprocess_of_job_id": str(job_id)})
+    return JobResponse(data=JobData.model_validate(job), meta=_meta(request))

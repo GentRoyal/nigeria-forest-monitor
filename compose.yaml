@@ -88,6 +88,10 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
       FOREST_MONITOR_ROOT: /workspace
+      NFM_API_INTERNAL_URL: http://api:8000
+      NFM_SCHEDULER_SERVICE_TOKEN: ${NFM_SCHEDULER_SERVICE_TOKEN:-local-development-scheduler-token-change-me}
+      NFM_SCHEDULER_ORGANISATION_ID: ${NFM_SCHEDULER_ORGANISATION_ID:-10000000-0000-4000-8000-000000000001}
+      NFM_STAC_API_URL: ${NFM_STAC_API_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
     ports:
       - "${NFM_AIRFLOW_PORT:-8080}:8080"
     volumes:

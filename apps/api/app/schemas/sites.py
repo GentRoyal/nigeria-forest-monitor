@@ -330,6 +330,109 @@ class ObservationResponse(BaseModel):
     meta: ResponseMeta
 
 
+class AssetData(BaseModel):
+    id: UUID
+    observation_id: UUID | None
+    processing_run_id: UUID | None
+    asset_type: str
+    cog_valid: bool | None
+    bands: list[dict[str, Any]]
+    resolution_metres: float | None
+    checksum: str | None
+    size_bytes: int | None
+    processing_version: str | None
+    lineage: dict[str, Any]
+    created_at: datetime
+
+
+class AssetListResponse(BaseModel):
+    data: list[AssetData]
+    meta: ResponseMeta
+
+
+class AssetDownloadData(BaseModel):
+    asset_id: UUID
+    reference: str
+    expires_at: datetime
+
+
+class AssetDownloadResponse(BaseModel):
+    data: AssetDownloadData
+    meta: ResponseMeta
+
+
+class NotificationData(BaseModel):
+    id: UUID
+    event_id: UUID | None
+    notification_type: str
+    safe_summary: str
+    sensitivity: str
+    protected_path: str
+    read_at: datetime | None
+    created_at: datetime
+
+
+class NotificationListResponse(BaseModel):
+    data: list[NotificationData]
+    meta: ResponseMeta
+
+
+class NotificationResponse(BaseModel):
+    data: NotificationData
+    meta: ResponseMeta
+
+
+class SubscriptionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    site_id: UUID | None = None
+    event_id: UUID | None = None
+    channels: list[Literal["in_app", "email"]] = Field(default_factory=lambda: ["in_app"], min_length=1, max_length=2)
+    digest_enabled: bool = True
+
+    @model_validator(mode="after")
+    def require_one_target(self) -> "SubscriptionCreateRequest":
+        if (self.site_id is None) == (self.event_id is None):
+            raise ValueError("supply exactly one of site_id or event_id")
+        return self
+
+
+class SubscriptionData(BaseModel):
+    id: UUID
+    site_id: UUID | None
+    event_id: UUID | None
+    channels: list[str]
+    digest_enabled: bool
+    created_at: datetime
+
+
+class SubscriptionResponse(BaseModel):
+    data: SubscriptionData
+    meta: ResponseMeta
+
+
+class SubscriptionListResponse(BaseModel):
+    data: list[SubscriptionData]
+    meta: ResponseMeta
+
+
+class NotificationPreferencesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channels: list[Literal["in_app", "email"]] = Field(min_length=1, max_length=2)
+    digest_enabled: bool = True
+
+
+class NotificationPreferencesData(BaseModel):
+    channels: list[str]
+    digest_enabled: bool
+
+
+class NotificationPreferencesResponse(BaseModel):
+    data: NotificationPreferencesData
+    meta: ResponseMeta
+
+
 class ChangeEventData(BaseModel):
     id: UUID
     site_id: UUID
@@ -419,6 +522,110 @@ class EventTransitionRequest(BaseModel):
     @classmethod
     def strip_transition_reason(cls, value: str) -> str:
         return value.strip()
+
+
+class EventAssignmentCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assignee_id: UUID
+    assignment_type: Literal["analyst_review", "institutional_verification"]
+    due_at: datetime | None = None
+
+
+class EventAssignmentData(BaseModel):
+    id: UUID
+    event_id: UUID
+    assignee_id: UUID
+    assigned_by: UUID
+    assignment_type: str
+    due_at: datetime | None
+    accepted_at: datetime | None
+    completed_at: datetime | None
+    status: str
+    created_at: datetime
+
+
+class EventAssignmentResponse(BaseModel):
+    data: EventAssignmentData
+    meta: ResponseMeta
+
+
+class EventAssignmentListResponse(BaseModel):
+    data: list[EventAssignmentData]
+    meta: ResponseMeta
+
+
+class EventEvidenceCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_type: Literal[
+        "raster_comparison", "analyst_note", "authorised_report", "authorised_media"
+    ]
+    source: str = Field(min_length=2, max_length=500)
+    collected_at: datetime
+    access_classification: Literal["normal", "sensitive", "restricted"] = "normal"
+    checksum: str | None = Field(default=None, min_length=16, max_length=256)
+    object_key: str | None = Field(default=None, min_length=1, max_length=1024)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("source", "checksum", "object_key")
+    @classmethod
+    def strip_evidence_text(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+
+class EventEvidenceData(BaseModel):
+    id: UUID
+    event_id: UUID
+    evidence_type: str
+    source: str
+    collected_by: UUID
+    collected_at: datetime
+    access_classification: str
+    checksum: str | None
+    object_key: str | None
+    provenance: dict[str, Any]
+    created_at: datetime
+
+
+class EventEvidenceResponse(BaseModel):
+    data: EventEvidenceData
+    meta: ResponseMeta
+
+
+class EventEvidenceListResponse(BaseModel):
+    data: list[EventEvidenceData]
+    meta: ResponseMeta
+
+
+class EventCommentCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    body: str = Field(min_length=1, max_length=10_000)
+
+    @field_validator("body")
+    @classmethod
+    def strip_comment(cls, value: str) -> str:
+        return value.strip()
+
+
+class EventCommentData(BaseModel):
+    id: UUID
+    event_id: UUID
+    author_id: UUID
+    body: str
+    created_at: datetime
+    edited_at: datetime | None
+
+
+class EventCommentResponse(BaseModel):
+    data: EventCommentData
+    meta: ResponseMeta
+
+
+class EventCommentListResponse(BaseModel):
+    data: list[EventCommentData]
+    meta: ResponseMeta
 
 
 class GridCellData(BaseModel):
