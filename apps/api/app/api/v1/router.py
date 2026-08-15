@@ -4,6 +4,7 @@ from .assets import router as assets_router
 from .audit import router as audit_router
 from .auth import router as auth_router
 from .events import router as events_router
+from .exports import router as exports_router
 from .invitations import router as invitations_router
 from .jobs import router as jobs_router
 from .members import router as members_router
@@ -25,4 +26,5 @@ router.include_router(notifications_router)
 router.include_router(subscriptions_router)
 router.include_router(observations_router)
 router.include_router(events_router)
+router.include_router(exports_router)
 router.include_router(sites_router)

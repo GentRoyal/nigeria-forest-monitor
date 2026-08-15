@@ -433,6 +433,49 @@ class NotificationPreferencesResponse(BaseModel):
     meta: ResponseMeta
 
 
+class ExportCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    export_type: Literal["geojson", "csv"]
+    resource: Literal["sites", "grids", "observations", "events"]
+    site_id: UUID
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExportData(BaseModel):
+    id: UUID
+    export_type: str
+    scope: dict[str, Any]
+    filters: dict[str, Any]
+    status: str
+    expires_at: datetime | None
+    checksum: str | None
+    sensitivity: str
+    download_count: int
+    created_at: datetime
+
+
+class ExportResponse(BaseModel):
+    data: ExportData
+    meta: ResponseMeta
+
+
+class ExportListResponse(BaseModel):
+    data: list[ExportData]
+    meta: ResponseMeta
+
+
+class ExportDownloadData(BaseModel):
+    export_id: UUID
+    reference: str
+    expires_at: datetime
+
+
+class ExportDownloadResponse(BaseModel):
+    data: ExportDownloadData
+    meta: ResponseMeta
+
+
 class ChangeEventData(BaseModel):
     id: UUID
     site_id: UUID
