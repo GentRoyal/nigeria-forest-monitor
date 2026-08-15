@@ -609,3 +609,82 @@ def test_manual_job_request_is_idempotent_and_respects_suspension() -> None:
         )
         assert override.status_code == 200
         assert override.json()["data"]["id"] == job["id"]
+
+
+def test_privileged_job_listing_and_detail() -> None:
+    slug = f"job-observability-{uuid4().hex}"
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {login(client)}"}
+        site = client.post("/api/v1/sites", headers=headers, json=site_payload(slug))
+        assert site.status_code == 201
+        site_id = site.json()["data"]["id"]
+        job = client.post(
+            f"/api/v1/sites/{site_id}/jobs",
+            headers={**headers, "Idempotency-Key": f"observability-{uuid4().hex}"},
+            json={"job_type": "discovery"},
+        )
+        assert job.status_code == 201, job.text
+        job_id = job.json()["data"]["id"]
+
+        listed = client.get("/api/v1/jobs", headers=headers, params={"site_id": site_id})
+        assert listed.status_code == 200, listed.text
+        assert any(item["id"] == job_id for item in listed.json()["data"])
+        detail = client.get(f"/api/v1/jobs/{job_id}", headers=headers)
+        assert detail.status_code == 200
+        assert detail.json()["data"]["id"] == job_id
+        cancelled = client.post(
+            f"/api/v1/jobs/{job_id}/cancel",
+            headers=headers,
+            json={"reason": "Integration cancellation test"},
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["data"]["status"] == "cancelled"
+        repeated = client.post(
+            f"/api/v1/jobs/{job_id}/cancel",
+            headers=headers,
+            json={"reason": "Repeat cancellation test"},
+        )
+        assert repeated.status_code == 409
+        assert (
+            client.get(f"/api/v1/jobs/{job_id}", headers=headers).json()["data"]["status"]
+            == "cancelled"
+        )
+        retry_headers = {**headers, "Idempotency-Key": f"retry-{uuid4().hex}"}
+        retried = client.post(
+            f"/api/v1/jobs/{job_id}/retry", headers=retry_headers, json={"priority": 7}
+        )
+        assert retried.status_code == 201, retried.text
+        retry_id = retried.json()["data"]["id"]
+        assert retried.json()["data"]["retry_of_job_id"] == job_id
+        assert retried.json()["data"]["trigger_type"] == "retry"
+        assert retried.json()["data"]["priority"] == 7
+        replay = client.post(
+            f"/api/v1/jobs/{job_id}/retry", headers=retry_headers, json={"priority": 7}
+        )
+        assert replay.status_code == 200
+        assert replay.json()["data"]["id"] == retry_id
+        invalid = client.post(
+            f"/api/v1/jobs/{retry_id}/retry",
+            headers={**headers, "Idempotency-Key": f"retry-invalid-{uuid4().hex}"},
+            json={},
+        )
+        assert invalid.status_code == 409
+
+        app.dependency_overrides[current_principal] = lambda: Principal(
+            user_id=OWNER_ID,
+            organisation_id=ORGANISATION_ID,
+            session_id=uuid4(),
+            email="analyst@nfm.local",
+            display_name="Analyst",
+            role="analyst",
+            status="active",
+            department_id=DEPARTMENT_ID,
+            department_name="Forest Monitoring",
+            timezone="Africa/Lagos",
+            teams=(),
+        )
+        try:
+            assert client.get("/api/v1/jobs").status_code == 403
+            assert client.get(f"/api/v1/jobs/{job_id}").status_code == 403
+        finally:
+            app.dependency_overrides.clear()

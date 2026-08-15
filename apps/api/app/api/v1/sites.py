@@ -1361,7 +1361,7 @@ async def request_manual_job(
         ).hexdigest()
         existing = await (
             await connection.execute(
-                "SELECT id,site_id,observation_id,grid_version_id,job_type,trigger_type,priority,status,progress,created_at,updated_at FROM processing_jobs WHERE idempotency_key=%s",
+                "SELECT id,site_id,observation_id,grid_version_id,retry_of_job_id,job_type,trigger_type,priority,status,progress,created_at,updated_at FROM processing_jobs WHERE idempotency_key=%s",
                 (domain_key,),
             )
         ).fetchone()
@@ -1371,7 +1371,7 @@ async def request_manual_job(
         try:
             job = await (
                 await connection.execute(
-                    """INSERT INTO processing_jobs(organisation_id,site_id,observation_id,grid_version_id,job_type,trigger_type,priority,idempotency_key,requested_configuration,requested_by) VALUES (%s,%s,%s,%s,%s,'manual',%s,%s,%s,%s) RETURNING id,site_id,observation_id,grid_version_id,job_type,trigger_type,priority,status,progress,created_at,updated_at""",
+                    """INSERT INTO processing_jobs(organisation_id,site_id,observation_id,grid_version_id,job_type,trigger_type,priority,idempotency_key,requested_configuration,requested_by) VALUES (%s,%s,%s,%s,%s,'manual',%s,%s,%s,%s) RETURNING id,site_id,observation_id,grid_version_id,retry_of_job_id,job_type,trigger_type,priority,status,progress,created_at,updated_at""",
                     (
                         principal.organisation_id,
                         site_id,
@@ -1394,7 +1394,7 @@ async def request_manual_job(
         except UniqueViolation:
             existing = await (
                 await connection.execute(
-                    "SELECT id,site_id,observation_id,grid_version_id,job_type,trigger_type,priority,status,progress,created_at,updated_at FROM processing_jobs WHERE idempotency_key=%s",
+                    "SELECT id,site_id,observation_id,grid_version_id,retry_of_job_id,job_type,trigger_type,priority,status,progress,created_at,updated_at FROM processing_jobs WHERE idempotency_key=%s",
                     (domain_key,),
                 )
             ).fetchone()

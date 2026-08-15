@@ -137,3 +137,24 @@ def test_manual_job_request_is_published() -> None:
     assert "post" in document["paths"]["/api/v1/sites/{site_id}/jobs"]
     request = document["components"]["schemas"]["ManualJobRequest"]["properties"]
     assert {"job_type", "priority", "suspended_site_override"}.issubset(request)
+
+
+def test_job_observability_batch_is_published() -> None:
+    document = app.openapi()
+    assert "get" in document["paths"]["/api/v1/jobs"]
+    assert "get" in document["paths"]["/api/v1/jobs/{job_id}"]
+    assert "post" in document["paths"]["/api/v1/jobs/{job_id}/cancel"]
+    assert "post" in document["paths"]["/api/v1/jobs/{job_id}/retry"]
+
+
+def test_observation_and_event_review_batch_is_published() -> None:
+    document = app.openapi()
+    assert "get" in document["paths"]["/api/v1/sites/{site_id}/observations"]
+    assert "get" in document["paths"]["/api/v1/observations/{observation_id}"]
+    event_path = document["paths"]["/api/v1/events/{event_id}"]
+    assert "get" in document["paths"]["/api/v1/events"]
+    assert "get" in event_path
+    assert "post" in document["paths"]["/api/v1/events/{event_id}/reviews"]
+    assert "post" in document["paths"]["/api/v1/events/{event_id}/transitions"]
+    review = document["components"]["schemas"]["ReviewCreateRequest"]["properties"]
+    assert {"review_type", "decision", "supporting_evidence_ids"}.issubset(review)

@@ -259,6 +259,7 @@ class JobData(BaseModel):
     site_id: UUID
     observation_id: UUID | None
     grid_version_id: UUID | None
+    retry_of_job_id: UUID | None
     job_type: str
     trigger_type: str
     priority: int
@@ -271,6 +272,153 @@ class JobData(BaseModel):
 class JobResponse(BaseModel):
     data: JobData
     meta: ResponseMeta
+
+
+class JobCancelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=3, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        return value.strip()
+
+
+class JobRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    priority: int | None = Field(default=None, ge=1, le=9)
+
+
+class JobListMeta(ResponseMeta):
+    next_cursor: str | None = None
+
+
+class JobListResponse(BaseModel):
+    data: list[JobData]
+    meta: JobListMeta
+
+
+class ObservationData(BaseModel):
+    id: UUID
+    site_id: UUID
+    catalogue_item_id: UUID
+    grid_version_id: UUID
+    baseline_observation_id: UUID | None
+    coverage_ratio: float | None
+    quality_assessment: dict[str, Any]
+    eligibility: str
+    eligibility_reason: str | None
+    discovery_method: str
+    status: str
+    observed_at: datetime
+    created_at: datetime
+
+
+class ObservationListMeta(ResponseMeta):
+    next_cursor: str | None = None
+
+
+class ObservationListResponse(BaseModel):
+    data: list[ObservationData]
+    meta: ObservationListMeta
+
+
+class ObservationResponse(BaseModel):
+    data: ObservationData
+    meta: ResponseMeta
+
+
+class ChangeEventData(BaseModel):
+    id: UUID
+    site_id: UUID
+    observation_id: UUID
+    processing_run_id: UUID
+    category: str
+    geometry: dict[str, Any]
+    affected_area_sq_m: float | None
+    signal_strength: float | None
+    review_status: str
+    sensitivity: str
+    resolution: str | None
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChangeEventListMeta(ResponseMeta):
+    next_cursor: str | None = None
+
+
+class ChangeEventListResponse(BaseModel):
+    data: list[ChangeEventData]
+    meta: ChangeEventListMeta
+
+
+class ChangeEventResponse(BaseModel):
+    data: ChangeEventData
+    meta: ResponseMeta
+
+
+class ReviewCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    review_type: Literal["remote_analysis", "institutional_verification"]
+    decision: str = Field(min_length=2, max_length=120)
+    rationale: str = Field(min_length=3, max_length=10_000)
+    confidence_statement: str = Field(min_length=3, max_length=2_000)
+    supporting_evidence_ids: list[UUID] = Field(default_factory=list, max_length=100)
+
+    @field_validator("decision", "rationale", "confidence_statement")
+    @classmethod
+    def strip_review_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class ReviewData(BaseModel):
+    id: UUID
+    event_id: UUID
+    review_type: str
+    decision: str
+    rationale: str
+    confidence_statement: str
+    actor_id: UUID
+    supporting_evidence_ids: list[UUID]
+    supersedes_review_id: UUID | None
+    submitted_at: datetime
+
+
+class ReviewResponse(BaseModel):
+    data: ReviewData
+    meta: ResponseMeta
+
+
+class ReviewListResponse(BaseModel):
+    data: list[ReviewData]
+    meta: ResponseMeta
+
+
+class EventTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    to_status: Literal[
+        "under_remote_review",
+        "awaiting_more_observations",
+        "remotely_corroborated",
+        "referred_to_authority",
+        "institutionally_verified",
+        "inconclusive",
+        "dismissed",
+        "resolved",
+    ]
+    reason: str = Field(min_length=3, max_length=500)
+    review_id: UUID | None = None
+
+    @field_validator("reason")
+    @classmethod
+    def strip_transition_reason(cls, value: str) -> str:
+        return value.strip()
 
 
 class GridCellData(BaseModel):
