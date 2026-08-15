@@ -168,7 +168,7 @@ def workspaces() -> dict[str, tuple[UUID, UUID, UUID]]:
         with connect() as connection:
             connection.execute("SELECT PostGIS_Version()").fetchone()
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            if not revision or revision[0] != "0007_site_resources":
+            if not revision or revision[0] != "0008_boundary_provenance":
                 pytest.skip("current database migrations are not applied")
     except psycopg.OperationalError:
         pytest.skip("local PostgreSQL is unavailable")
@@ -224,17 +224,19 @@ def test_spatial_queries_return_correct_grid_cells(workspaces) -> None:
         )
         connection.execute(
             """
-            INSERT INTO site_boundary_versions(
-              id,organisation_id,site_id,version,geometry,source_authority,
-              source_identifier,licence,attribution,source_crs,checksum
-            ) VALUES (
-              %s,%s,%s,1,
-              ST_Multi(ST_GeomFromText('POLYGON((3 8,5 8,5 10,3 10,3 8))',4326)),
-              'Test fixture','synthetic','CC0','Integration test','EPSG:4326','fixture'
+              INSERT INTO site_boundary_versions(
+                id,organisation_id,site_id,version,geometry,source_authority,
+                source_identifier,licence,attribution,source_crs,checksum,
+                created_by,change_reason
+              ) VALUES (
+                %s,%s,%s,1,
+                ST_Multi(ST_GeomFromText('POLYGON((3 8,5 8,5 10,3 10,3 8))',4326)),
+                'Test fixture','synthetic','CC0','Integration test','EPSG:4326','fixture',
+                %s,'Synthetic spatial fixture'
+              )
+              """,
+                (boundary_id, organisation_id, site_id, owner_id),
             )
-            """,
-            (boundary_id, organisation_id, site_id),
-        )
         connection.execute(
             """
             INSERT INTO grid_versions(

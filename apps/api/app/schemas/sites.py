@@ -39,6 +39,15 @@ class BoundaryCreateRequest(BaseModel):
         return value.strip() or None if value is not None else None
 
 
+class BoundaryVersionCreateRequest(BoundaryCreateRequest):
+    reason: str = Field(min_length=3, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        return value.strip()
+
+
 class SiteCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -124,7 +133,25 @@ class BoundaryData(BaseModel):
     validation_result: dict[str, Any]
     area_sq_km: float
     bounds: dict[str, float]
+    created_by: UUID
+    change_reason: str
+    superseded_at: datetime | None
+    is_current: bool
     created_at: datetime
+
+
+class BoundaryResponse(BaseModel):
+    data: BoundaryData
+    meta: ResponseMeta
+
+
+class BoundaryListMeta(ResponseMeta):
+    next_cursor: str | None = None
+
+
+class BoundaryListResponse(BaseModel):
+    data: list[BoundaryData]
+    meta: BoundaryListMeta
 
 
 class SiteData(BaseModel):

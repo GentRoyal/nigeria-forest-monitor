@@ -11,6 +11,10 @@ from ...db import tenant_connection
 from ...schemas.auth import ResponseMeta
 from ...schemas.sites import (
     BoundaryData,
+    BoundaryListMeta,
+    BoundaryListResponse,
+    BoundaryResponse,
+    BoundaryVersionCreateRequest,
     SiteCreateRequest,
     SiteData,
     SiteListMeta,
@@ -135,33 +139,58 @@ _SITE_COLUMNS = """
   CASE WHEN b.id IS NULL THEN NULL ELSE ST_AsGeoJSON(b.geometry,9,0)::jsonb END boundary_geometry,
   b.source_authority,b.source_identifier,b.source_url,b.licence,b.attribution,
   b.effective_date,b.source_crs,b.checksum,b.validation_result,b.created_at boundary_created_at,
+  b.created_by boundary_created_by,b.change_reason boundary_change_reason,
+  b.superseded_at boundary_superseded_at,
+  (b.id=s.current_boundary_version_id) boundary_is_current,
   CASE WHEN b.id IS NULL THEN NULL ELSE ST_Area(b.geometry::geography)/1000000.0 END area_sq_km,
   CASE WHEN b.id IS NULL THEN NULL ELSE jsonb_build_object(
     'west',ST_XMin(Box2D(b.geometry)),'south',ST_YMin(Box2D(b.geometry)),
     'east',ST_XMax(Box2D(b.geometry)),'north',ST_YMax(Box2D(b.geometry))) END bounds
 """
 
+_BOUNDARY_COLUMNS = """
+  b.id boundary_id,b.version boundary_version,
+  CASE WHEN %s::boolean THEN ST_AsGeoJSON(b.geometry,9,0)::jsonb ELSE NULL END boundary_geometry,
+  b.source_authority,b.source_identifier,b.source_url,b.licence,b.attribution,
+  b.effective_date,b.source_crs,b.checksum,b.validation_result,b.created_at boundary_created_at,
+  b.created_by boundary_created_by,b.change_reason boundary_change_reason,
+  b.superseded_at boundary_superseded_at,
+  (b.id=s.current_boundary_version_id) boundary_is_current,
+  ST_Area(b.geometry::geography)/1000000.0 area_sq_km,
+  jsonb_build_object(
+    'west',ST_XMin(Box2D(b.geometry)),'south',ST_YMin(Box2D(b.geometry)),
+    'east',ST_XMax(Box2D(b.geometry)),'north',ST_YMax(Box2D(b.geometry))) bounds
+"""
+
+
+def _boundary_data(row: dict[str, Any], *, include_geometry: bool) -> BoundaryData | None:
+    if not row["boundary_id"]:
+        return None
+    return BoundaryData(
+        id=row["boundary_id"],
+        version=row["boundary_version"],
+        geometry=row["boundary_geometry"] if include_geometry else None,
+        source_authority=row["source_authority"],
+        source_identifier=row["source_identifier"],
+        source_url=row["source_url"],
+        licence=row["licence"],
+        attribution=row["attribution"],
+        effective_date=row["effective_date"],
+        source_crs=row["source_crs"],
+        checksum=row["checksum"],
+        validation_result=row["validation_result"],
+        area_sq_km=float(row["area_sq_km"]),
+        bounds=row["bounds"],
+        created_by=row["boundary_created_by"],
+        change_reason=row["boundary_change_reason"],
+        superseded_at=row["boundary_superseded_at"],
+        is_current=row["boundary_is_current"],
+        created_at=row["boundary_created_at"],
+    )
+
 
 def _site_data(row: dict[str, Any], *, include_geometry: bool) -> SiteData:
-    boundary = None
-    if row["boundary_id"]:
-        boundary = BoundaryData(
-            id=row["boundary_id"],
-            version=row["boundary_version"],
-            geometry=row["boundary_geometry"] if include_geometry else None,
-            source_authority=row["source_authority"],
-            source_identifier=row["source_identifier"],
-            source_url=row["source_url"],
-            licence=row["licence"],
-            attribution=row["attribution"],
-            effective_date=row["effective_date"],
-            source_crs=row["source_crs"],
-            checksum=row["checksum"],
-            validation_result=row["validation_result"],
-            area_sq_km=float(row["area_sq_km"]),
-            bounds=row["bounds"],
-            created_at=row["boundary_created_at"],
-        )
+    boundary = _boundary_data(row, include_geometry=include_geometry)
     return SiteData(
         id=row["id"],
         organisation_id=row["organisation_id"],
@@ -383,8 +412,8 @@ async def create_site(
             ).fetchone()
             boundary = await (
                 await connection.execute(
-                    """INSERT INTO site_boundary_versions(organisation_id,site_id,version,geometry,source_authority,source_identifier,source_url,licence,attribution,effective_date,source_crs,validation_result,checksum)
-                VALUES (%s,%s,1,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    """INSERT INTO site_boundary_versions(organisation_id,site_id,version,geometry,source_authority,source_identifier,source_url,licence,attribution,effective_date,source_crs,validation_result,checksum,created_by,change_reason)
+                VALUES (%s,%s,1,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'Initial boundary supplied during site creation') RETURNING id""",
                     (
                         principal.organisation_id,
                         site["id"],
@@ -398,6 +427,7 @@ async def create_site(
                         payload.boundary.source_crs,
                         Jsonb(aoi.validation_result),
                         aoi.checksum,
+                        principal.user_id,
                     ),
                 )
             ).fetchone()
@@ -456,6 +486,215 @@ async def create_site(
     response.headers["ETag"] = _etag(created["id"], created["version"])
     response.headers["Location"] = f"/api/v1/sites/{created['id']}"
     return SiteResponse(data=_site_data(created, include_geometry=True), meta=_meta(request))
+
+
+@router.get("/sites/{site_id}/boundaries", response_model=BoundaryListResponse)
+async def list_site_boundaries(
+    site_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+    include_geometry: Annotated[bool, Query()] = False,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
+) -> BoundaryListResponse:
+    visibility, visibility_params = _visibility_sql(principal)
+    scope = cursor_scope(
+        {
+            "organisation_id": str(principal.organisation_id),
+            "user_id": str(principal.user_id),
+            "role": principal.role,
+            "site_id": str(site_id),
+            "include_geometry": include_geometry,
+        }
+    )
+    position = None
+    if cursor:
+        try:
+            position = decode_cursor(cursor, scope=scope)
+        except CursorError as error:
+            raise ApiError(
+                400,
+                "invalid_cursor",
+                "Invalid pagination cursor",
+                "The cursor is invalid or does not belong to this boundary query.",
+            ) from error
+    cursor_time = position.created_at if position else None
+    cursor_id = position.resource_id if position else None
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        rows = await (
+            await connection.execute(
+                f"""SELECT {_BOUNDARY_COLUMNS}
+                FROM site_boundary_versions b
+                JOIN sites s ON s.id=b.site_id
+                WHERE b.site_id=%s
+                  AND (%s::timestamptz IS NULL OR (b.created_at,b.id)<(%s,%s::uuid))
+                ORDER BY b.created_at DESC,b.id DESC LIMIT %s""",
+                (include_geometry, site_id, cursor_time, cursor_time, cursor_id, limit + 1),
+            )
+        ).fetchall()
+    page, has_more = rows[:limit], len(rows) > limit
+    next_cursor = (
+        encode_cursor(
+            CursorPosition(page[-1]["boundary_created_at"], page[-1]["boundary_id"]),
+            scope=scope,
+        )
+        if has_more
+        else None
+    )
+    return BoundaryListResponse(
+        data=[_boundary_data(row, include_geometry=include_geometry) for row in page],
+        meta=BoundaryListMeta(request_id=UUID(request.state.request_id), next_cursor=next_cursor),
+    )
+
+
+@router.post("/sites/{site_id}/boundaries", response_model=BoundaryResponse, status_code=201)
+async def create_site_boundary(
+    site_id: UUID,
+    payload: BoundaryVersionCreateRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(current_principal)],
+    if_match: Annotated[str | None, Header()] = None,
+) -> BoundaryResponse:
+    _require_management(principal)
+    expected = _expected_version(if_match, site_id)
+    visibility, visibility_params = _visibility_sql(principal)
+    provenance = payload.model_dump(exclude={"geometry", "reason"}, mode="json")
+    settings = get_settings()
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params, lock=True)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        if site["version"] != expected:
+            raise ApiError(
+                409,
+                "version_conflict",
+                "Resource version conflict",
+                "The site was changed after it was loaded.",
+                {"ETag": _etag(site["id"], site["version"])},
+            )
+        try:
+            aoi = await validate_aoi(
+                connection,
+                geometry=payload.geometry.model_dump(),
+                source_crs=payload.source_crs,
+                provenance=provenance,
+                max_area_sq_km=settings.max_aoi_area_sq_km,
+                max_vertices=settings.max_aoi_vertices,
+            )
+        except AoiValidationError as error:
+            raise ApiError(422, "invalid_geometry", "Invalid site boundary", str(error)) from error
+        if site["boundary_id"]:
+            unchanged = await (
+                await connection.execute(
+                    """SELECT ST_Equals(geometry,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326)) unchanged
+                    FROM site_boundary_versions WHERE id=%s""",
+                    (json.dumps(aoi.geometry), site["boundary_id"]),
+                )
+            ).fetchone()
+            if unchanged["unchanged"]:
+                raise ApiError(
+                    409,
+                    "boundary_unchanged",
+                    "Boundary is unchanged",
+                    "The submitted geometry is spatially equal to the current boundary.",
+                )
+        next_version = int(site["boundary_version"] or 0) + 1
+        if site["boundary_id"]:
+            await connection.execute(
+                "UPDATE site_boundary_versions SET superseded_at=now() WHERE id=%s",
+                (site["boundary_id"],),
+            )
+        try:
+            boundary = await (
+                await connection.execute(
+                    """INSERT INTO site_boundary_versions(
+                      organisation_id,site_id,version,geometry,source_authority,
+                      source_identifier,source_url,licence,attribution,effective_date,
+                      source_crs,validation_result,checksum,created_by,change_reason
+                    ) VALUES (
+                      %s,%s,%s,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s,%s,%s,%s,%s,%s,
+                      %s,%s,%s,%s,%s
+                    ) RETURNING id""",
+                    (
+                        principal.organisation_id,
+                        site_id,
+                        next_version,
+                        json.dumps(aoi.geometry),
+                        payload.source_authority,
+                        payload.source_identifier,
+                        payload.source_url,
+                        payload.licence,
+                        payload.attribution,
+                        payload.effective_date,
+                        payload.source_crs,
+                        Jsonb(aoi.validation_result),
+                        aoi.checksum,
+                        principal.user_id,
+                        payload.reason,
+                    ),
+                )
+            ).fetchone()
+        except UniqueViolation as error:
+            raise ApiError(
+                409,
+                "boundary_version_conflict",
+                "Boundary version conflict",
+                "Another boundary version was created concurrently.",
+            ) from error
+        await connection.execute(
+            """UPDATE sites SET current_boundary_version_id=%s,version=version+1,updated_at=now()
+            WHERE id=%s""",
+            (boundary["id"], site_id),
+        )
+        await record_audit(
+            connection,
+            organisation_id=principal.organisation_id,
+            actor_id=principal.user_id,
+            action="site.boundary_created",
+            target_type="site_boundary_version",
+            target_id=boundary["id"],
+            before={
+                "site_id": str(site_id),
+                "version": site["boundary_version"],
+                "checksum": site["checksum"],
+            },
+            after={
+                "site_id": str(site_id),
+                "version": next_version,
+                "checksum": aoi.checksum,
+                "source_authority": payload.source_authority,
+                "source_identifier": payload.source_identifier,
+            },
+            reason=payload.reason,
+            ip_address=_client_ip(request),
+        )
+        created = await (
+            await connection.execute(
+                f"""SELECT {_BOUNDARY_COLUMNS}
+                FROM site_boundary_versions b JOIN sites s ON s.id=b.site_id
+                WHERE b.id=%s""",
+                (True, boundary["id"]),
+            )
+        ).fetchone()
+    response.headers["ETag"] = _etag(site_id, expected + 1)
+    response.headers["Location"] = f"/api/v1/sites/{site_id}/boundaries"
+    return BoundaryResponse(
+        data=_boundary_data(created, include_geometry=True), meta=_meta(request)
+    )
 
 
 @router.get("/sites/{site_id}", response_model=SiteResponse)

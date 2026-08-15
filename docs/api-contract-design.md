@@ -402,9 +402,9 @@ the same-department rule in one transaction.
 
 ## 13. Site endpoints
 
-Implementation status: the first batch (list, create, detail, and versioned
-metadata update) is implemented. Boundary history, lifecycle, grids, team
-grants, and timeline remain later batches.
+Implementation status: list, create, detail, versioned metadata update,
+boundary history, and validated immutable boundary replacement are implemented.
+Lifecycle, grids, team grants, and timeline remain later batches.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -436,8 +436,10 @@ grants, and timeline remain later batches.
   "managing_department_id": "uuid",
   "tags": ["pilot", "priority"],
   "boundary": {
-    "type": "MultiPolygon",
-    "coordinates": [],
+    "geometry": {
+      "type": "MultiPolygon",
+      "coordinates": []
+    },
     "source_authority": "Submitting institution",
     "source_identifier": "reference",
     "licence": "authorised internal use",
@@ -450,6 +452,11 @@ grants, and timeline remain later batches.
 
 Site and first boundary are created atomically. A custom site requires source,
 authority, licence, attribution, CRS, checksum, and validation metadata.
+
+Boundary history omits geometry by default; clients explicitly request it with
+`include_geometry=true`. Adding a replacement requires the current site ETag
+in `If-Match` and a human-readable `reason`. The previous version is retained
+and only its `superseded_at` lifecycle marker may change.
 
 ### AOI validation
 

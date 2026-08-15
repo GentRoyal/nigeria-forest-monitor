@@ -56,6 +56,21 @@ def site_payload(slug: str, *, sensitivity: str = "normal") -> dict:
     }
 
 
+def replacement_boundary(identifier: str) -> dict:
+    return {
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[3.0, 8.0], [3.2, 8.0], [3.2, 8.2], [3.0, 8.2], [3.0, 8.0]]],
+        },
+        "source_authority": "Integration Test Authority",
+        "source_identifier": identifier,
+        "licence": "authorised internal use",
+        "attribution": "Integration replacement fixture",
+        "source_crs": "EPSG:4326",
+        "reason": "Authorised boundary correction",
+    }
+
+
 def test_site_create_list_detail_and_versioned_update() -> None:
     slug = f"integration-{uuid4().hex}"
     with TestClient(app) as client:
@@ -150,9 +165,15 @@ def test_invalid_boundary_rolls_back_site_and_permissions_hide_raw_sites() -> No
             normal = client.get("/api/v1/sites", params={"q": slug})
             assert [item["id"] for item in normal.json()["data"]] == [site_id]
             assert client.get(f"/api/v1/sites/{site_id}").status_code == 200
+            assert client.get(f"/api/v1/sites/{site_id}/boundaries").status_code == 200
             assert client.get(f"/api/v1/sites/{sensitive_id}").status_code == 404
             denied = client.post("/api/v1/sites", json=site_payload(f"analyst-{uuid4().hex}"))
             assert denied.status_code == 403
+            denied_boundary = client.post(
+                f"/api/v1/sites/{site_id}/boundaries",
+                json=replacement_boundary(f"analyst-{uuid4().hex}"),
+            )
+            assert denied_boundary.status_code == 403
         finally:
             app.dependency_overrides.clear()
 
@@ -178,3 +199,103 @@ def test_invalid_boundary_rolls_back_site_and_permissions_hide_raw_sites() -> No
             )
         finally:
             app.dependency_overrides.clear()
+
+
+def test_boundary_history_replacement_etag_and_immutability() -> None:
+    import asyncio
+
+    from psycopg.errors import ObjectNotInPrerequisiteState
+
+    from apps.api.app.db import tenant_connection
+
+    slug = f"boundary-{uuid4().hex}"
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {login(client)}"}
+        created = client.post("/api/v1/sites", headers=headers, json=site_payload(slug))
+        assert created.status_code == 201, created.text
+        site_id = created.json()["data"]["id"]
+        first_boundary_id = created.json()["data"]["current_boundary"]["id"]
+        original_etag = created.headers["etag"]
+
+        initial = client.get(f"/api/v1/sites/{site_id}/boundaries", headers=headers)
+        assert initial.status_code == 200
+        assert len(initial.json()["data"]) == 1
+        assert initial.json()["data"][0]["geometry"] is None
+        assert initial.json()["data"][0]["is_current"] is True
+
+        missing = client.post(
+            f"/api/v1/sites/{site_id}/boundaries",
+            headers=headers,
+            json=replacement_boundary(f"{slug}-v2"),
+        )
+        assert missing.status_code == 428
+        replaced = client.post(
+            f"/api/v1/sites/{site_id}/boundaries",
+            headers={**headers, "If-Match": original_etag},
+            json=replacement_boundary(f"{slug}-v2"),
+        )
+        assert replaced.status_code == 201, replaced.text
+        replacement = replaced.json()["data"]
+        assert replacement["version"] == 2
+        assert replacement["is_current"] is True
+        assert replacement["geometry"]["type"] == "MultiPolygon"
+        assert replacement["change_reason"] == "Authorised boundary correction"
+        latest_etag = replaced.headers["etag"]
+        assert latest_etag != original_etag
+
+        history = client.get(
+            f"/api/v1/sites/{site_id}/boundaries",
+            headers=headers,
+            params={"include_geometry": "true"},
+        )
+        assert history.status_code == 200, history.text
+        versions = history.json()["data"]
+        assert [item["version"] for item in versions] == [2, 1]
+        assert versions[0]["is_current"] is True
+        assert versions[1]["is_current"] is False
+        assert versions[1]["superseded_at"] is not None
+        assert all(item["geometry"]["type"] == "MultiPolygon" for item in versions)
+
+        first_page = client.get(
+            f"/api/v1/sites/{site_id}/boundaries", headers=headers, params={"limit": 1}
+        )
+        assert [item["version"] for item in first_page.json()["data"]] == [2]
+        next_cursor = first_page.json()["meta"]["next_cursor"]
+        assert next_cursor
+        second_page = client.get(
+            f"/api/v1/sites/{site_id}/boundaries",
+            headers=headers,
+            params={"limit": 1, "cursor": next_cursor},
+        )
+        assert [item["version"] for item in second_page.json()["data"]] == [1]
+        assert second_page.json()["meta"]["next_cursor"] is None
+
+        unchanged = client.post(
+            f"/api/v1/sites/{site_id}/boundaries",
+            headers={**headers, "If-Match": latest_etag},
+            json=replacement_boundary(f"{slug}-same-geometry"),
+        )
+        assert unchanged.status_code == 409
+        assert unchanged.json()["code"] == "boundary_unchanged"
+        stale = client.post(
+            f"/api/v1/sites/{site_id}/boundaries",
+            headers={**headers, "If-Match": original_etag},
+            json={
+                **replacement_boundary(f"{slug}-v3"),
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[3.0, 8.0], [3.3, 8.0], [3.3, 8.3], [3.0, 8.3], [3.0, 8.0]]],
+                },
+            },
+        )
+        assert stale.status_code == 409
+
+    async def mutate_historical_boundary() -> None:
+        async with tenant_connection(ORGANISATION_ID, OWNER_ID) as connection:
+            await connection.execute(
+                "UPDATE site_boundary_versions SET attribution='tampered' WHERE id=%s",
+                (first_boundary_id,),
+            )
+
+    with pytest.raises(ObjectNotInPrerequisiteState):
+        asyncio.run(mutate_historical_boundary())

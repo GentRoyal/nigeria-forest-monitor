@@ -89,3 +89,15 @@ def test_first_site_management_batch_is_published() -> None:
     boundary = document["components"]["schemas"]["BoundaryCreateRequest"]["properties"]
     assert "checksum" not in boundary
     assert "validation_result" not in boundary
+
+
+def test_boundary_version_batch_is_published() -> None:
+    document = app.openapi()
+    path = document["paths"]["/api/v1/sites/{site_id}/boundaries"]
+    assert {"get", "post"}.issubset(path)
+
+    request = document["components"]["schemas"]["BoundaryVersionCreateRequest"]["properties"]
+    assert "reason" in request
+    assert "checksum" not in request
+    boundary = document["components"]["schemas"]["BoundaryData"]["properties"]
+    assert {"created_by", "change_reason", "superseded_at", "is_current"}.issubset(boundary)
