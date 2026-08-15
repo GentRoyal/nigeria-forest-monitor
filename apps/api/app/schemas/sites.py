@@ -434,7 +434,7 @@ class NotificationPreferencesResponse(BaseModel):
 
 
 class ExportCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{"export_type": "geojson", "resource": "events", "site_id": "11111111-1111-4111-8111-111111111111", "filters": {"review_status": "new"}}]})
 
     export_type: Literal["geojson", "csv"]
     resource: Literal["sites", "grids", "observations", "events"]

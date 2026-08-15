@@ -51,11 +51,16 @@ services:
       NFM_MAX_AOI_AREA_SQ_KM: ${NFM_MAX_AOI_AREA_SQ_KM:-2000000}
       NFM_MAX_AOI_VERTICES: ${NFM_MAX_AOI_VERTICES:-100000}
       NFM_MAX_GRID_CELLS: ${NFM_MAX_GRID_CELLS:-100000}
+      NFM_EXPORT_ROOT: /data/exports
+      NFM_ASSET_ROOT: /data/assets
     ports:
       - "${NFM_API_PORT:-8000}:8000"
     depends_on:
       postgres-init:
         condition: service_completed_successfully
+    volumes:
+      - ./data/exports:/data/exports
+      - ./data/assets:/data/assets
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
       interval: 10s
@@ -92,6 +97,7 @@ services:
       NFM_SCHEDULER_SERVICE_TOKEN: ${NFM_SCHEDULER_SERVICE_TOKEN:-local-development-scheduler-token-change-me}
       NFM_SCHEDULER_ORGANISATION_ID: ${NFM_SCHEDULER_ORGANISATION_ID:-10000000-0000-4000-8000-000000000001}
       NFM_STAC_API_URL: ${NFM_STAC_API_URL:-https://planetarycomputer.microsoft.com/api/stac/v1}
+      NFM_EXPORT_ROOT: /data/exports
     ports:
       - "${NFM_AIRFLOW_PORT:-8080}:8080"
     volumes:
@@ -100,6 +106,7 @@ services:
       - ./configs:/workspace/configs:ro
       - ./ROADMAP.md:/workspace/ROADMAP.md:ro
       - ./data:/workspace/data
+      - ./data/exports:/data/exports
       - ./models:/workspace/models
       - ./reports:/workspace/reports
     depends_on:

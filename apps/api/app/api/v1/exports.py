@@ -1,10 +1,12 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Request, Response
+from fastapi.responses import FileResponse
 from psycopg.types.json import Jsonb
 
 from ...db import tenant_connection
@@ -18,6 +20,7 @@ from ...schemas.sites import (
 )
 from ...security.audit import record_audit
 from ...security.permissions import Action, is_allowed
+from ...settings import get_settings
 from ..dependencies import Principal, current_principal
 from ..errors import ApiError
 from .sites import _visibility_sql
@@ -28,6 +31,14 @@ _COLUMNS = "id,export_type,scope,filters,status,expires_at,checksum,sensitivity,
 
 def _meta(request: Request) -> dict[str, UUID]:
     return {"request_id": UUID(request.state.request_id)}
+
+
+def _local_export_path(object_key: str):
+    root = Path(get_settings().export_root).resolve()
+    candidate = (root / object_key).resolve()
+    if root not in candidate.parents:
+        raise ApiError(404, "export_not_ready", "Export not ready", "The export is not available for download.")
+    return candidate
 
 
 @router.post("/exports", response_model=ExportResponse, status_code=201)
@@ -79,4 +90,17 @@ async def download_export(export_id: UUID, request: Request, principal: Annotate
             raise ApiError(410, "export_expired", "Export expired", "Request a new export.")
         expires_at = datetime.now(UTC) + timedelta(minutes=5)
         await connection.execute("UPDATE exports SET download_count=download_count+1 WHERE id=%s", (export_id,))
-    return ExportDownloadResponse(data=ExportDownloadData(export_id=export_id, reference=f"local-export://{export_id}?expires_at={expires_at.isoformat()}", expires_at=expires_at), meta=_meta(request))
+    return ExportDownloadResponse(data=ExportDownloadData(export_id=export_id, reference=f"/api/v1/exports/{export_id}/content?expires_at={expires_at.isoformat()}", expires_at=expires_at), meta=_meta(request))
+
+
+@router.get("/exports/{export_id}/content", response_class=FileResponse)
+async def export_content(export_id: UUID, principal: Annotated[Principal, Depends(current_principal)]):
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        export = await (await connection.execute("SELECT export_type,status,expires_at,result_object_key FROM exports WHERE id=%s AND requested_by=%s", (export_id, principal.user_id))).fetchone()
+    if not export or export["status"] != "completed" or not export["result_object_key"] or (export["expires_at"] and export["expires_at"] <= datetime.now(UTC)):
+        raise ApiError(404, "export_not_ready", "Export not ready", "The export is not available for download.")
+    path = _local_export_path(export["result_object_key"])
+    if not path.is_file():
+        raise ApiError(404, "export_not_ready", "Export not ready", "The export file is unavailable.")
+    media_type = "application/geo+json" if export["export_type"] == "geojson" else "text/csv"
+    return FileResponse(path, media_type=media_type, filename=path.name)

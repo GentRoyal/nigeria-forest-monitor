@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -82,6 +83,14 @@ def _event_visibility(principal: Principal) -> tuple[str, list[object]]:
     return _visibility_sql(principal, "s")
 
 
+def _time(value: datetime | None, field: str) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        raise ApiError(422, "invalid_time_range", "Invalid time range", f"{field} must include a timezone offset.")
+    return value.astimezone(UTC)
+
+
 async def _find_event(connection, principal: Principal, event_id: UUID, *, lock: bool = False):
     visibility, params = _event_visibility(principal)
     return await (await connection.execute(
@@ -97,11 +106,17 @@ async def list_events(
     principal: Annotated[Principal, Depends(current_principal)],
     site_id: Annotated[UUID | None, Query()] = None,
     review_status: Annotated[str | None, Query(max_length=50)] = None,
+    created_after: Annotated[datetime | None, Query()] = None,
+    created_before: Annotated[datetime | None, Query()] = None,
+    min_signal_strength: Annotated[float | None, Query(ge=0, le=1)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
 ) -> ChangeEventListResponse:
     visibility, visibility_params = _event_visibility(principal)
-    scope = cursor_scope({"organisation_id": str(principal.organisation_id), "site_id": str(site_id) if site_id else None, "review_status": review_status})
+    created_after, created_before = _time(created_after, "created_after"), _time(created_before, "created_before")
+    if created_after and created_before and created_after >= created_before:
+        raise ApiError(422, "invalid_time_range", "Invalid time range", "created_after must be earlier than created_before.")
+    scope = cursor_scope({"organisation_id": str(principal.organisation_id), "site_id": str(site_id) if site_id else None, "review_status": review_status, "created_after": created_after.isoformat() if created_after else None, "created_before": created_before.isoformat() if created_before else None, "min_signal_strength": min_signal_strength})
     try:
         position = decode_cursor(cursor, scope=scope) if cursor else None
     except CursorError as error:
@@ -112,9 +127,12 @@ async def list_events(
             WHERE s.status='active' AND ({visibility})
               AND (%s::uuid IS NULL OR e.site_id=%s)
               AND (%s::text IS NULL OR e.review_status=%s)
+              AND (%s::timestamptz IS NULL OR e.created_at>=%s)
+              AND (%s::timestamptz IS NULL OR e.created_at<%s)
+              AND (%s::numeric IS NULL OR e.signal_strength>=%s)
               AND (%s::timestamptz IS NULL OR (e.created_at,e.id)<(%s,%s::uuid))
             ORDER BY e.created_at DESC,e.id DESC LIMIT %s""",
-            (*visibility_params, site_id, site_id, review_status, review_status,
+            (*visibility_params, site_id, site_id, review_status, review_status, created_after, created_after, created_before, created_before, min_signal_strength, min_signal_strength,
              position.created_at if position else None, position.created_at if position else None,
              position.resource_id if position else None, limit + 1),
         )).fetchall()

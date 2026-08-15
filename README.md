@@ -81,6 +81,7 @@ of the approved operational event score or government verification workflow.
 ## Product documentation
 
 - [Backend and infrastructure study guide](docs/backend-infrastructure-study-guide.md)
+- [Versioned API contract](docs/runbooks/API_CONTRACT.md)
 - [Phase 4 API contract design](docs/api-contract-design.md)
 - [Production roadmap](ROADMAP.md)
 - [MVP product specification](docs/product-spec.md)

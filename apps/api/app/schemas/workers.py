@@ -169,6 +169,56 @@ class WorkerObservationResponse(BaseModel):
     data: WorkerObservationData
 
 
+class WorkerResultAssetInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_type: Literal["source_reference", "derived_cog", "thumbnail"]
+    object_key: str | None = Field(default=None, max_length=1024)
+    source_href: str | None = Field(default=None, max_length=2048)
+    cog_valid: bool | None = None
+    bands: list[dict[str, Any]] = Field(default_factory=list)
+    resolution_metres: float | None = Field(default=None, gt=0)
+    checksum: str | None = Field(default=None, max_length=256)
+    size_bytes: int | None = Field(default=None, ge=0)
+    processing_version: str | None = Field(default=None, max_length=160)
+    lineage: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_correct_location(self) -> "WorkerResultAssetInput":
+        if self.asset_type == "source_reference" and not self.source_href:
+            raise ValueError("source_reference assets require source_href")
+        if self.asset_type != "source_reference" and not self.object_key:
+            raise ValueError("derived assets require object_key")
+        return self
+
+
+class WorkerGridObservationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    grid_cell_id: UUID
+    quality: dict[str, Any] = Field(default_factory=dict)
+    measurements: dict[str, Any] = Field(default_factory=dict)
+    change_features: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkerResultEventInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: Literal[
+        "possible_vegetation_loss",
+        "possible_linear_clearing",
+        "possible_burn_signal",
+        "possible_water_change",
+        "unknown_disturbance",
+    ]
+    geometry: GeoJsonArea
+    affected_area_sq_m: float | None = Field(default=None, ge=0)
+    signal_strength: float | None = Field(default=None, ge=0, le=1)
+    sensitivity: Literal["normal", "sensitive"] = "normal"
+    resolution: str | None = Field(default=None, max_length=500)
+    grid_cells: list["WorkerEventCellInput"] = Field(default_factory=list, max_length=10_000)
+
+
 class WorkerCompleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -188,6 +238,9 @@ class WorkerCompleteRequest(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list, max_length=100)
     checksum: str | None = Field(default=None, max_length=256)
+    assets: list[WorkerResultAssetInput] = Field(default_factory=list, max_length=10_000)
+    grid_observations: list[WorkerGridObservationInput] = Field(default_factory=list, max_length=100_000)
+    events: list[WorkerResultEventInput] = Field(default_factory=list, max_length=10_000)
 
 
 class WorkerCompleteResponse(BaseModel):
@@ -290,6 +343,23 @@ class WorkerChangeEventData(BaseModel):
 
 class WorkerChangeEventResponse(BaseModel):
     data: WorkerChangeEventData
+
+
+class WorkerExportCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: UUID
+    result_object_key: str = Field(min_length=1, max_length=1024)
+    checksum: str = Field(min_length=16, max_length=256)
+    expires_at: datetime
+
+    @field_validator("result_object_key")
+    @classmethod
+    def relative_export_key(cls, value: str) -> str:
+        key = value.strip().replace("\\", "/")
+        if key.startswith("/") or ".." in key.split("/"):
+            raise ValueError("result_object_key must be a relative export path")
+        return key
 
 
 class WorkerDiscoveryCursorRequest(BaseModel):

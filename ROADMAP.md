@@ -160,28 +160,40 @@ invitations, audit history, and deletion rules are verified automatically.
   completion, and failure callbacks; workers never use interactive user credentials.
 - [x] Publish catalogue items, observations, processing-run provenance, raster assets,
   and possible-change events from authenticated, lease-bound worker callbacks.
-- [ ] Complete the single-transaction publication path for a processing result:
-  processing run, assets, grid measurements, and change events must commit together
-  before the job can become completed.
-- [ ] Add a unified site timeline that combines observations, jobs, events, reviews,
+- [x] Complete the single-transaction publication path for a processing result:
+  processing run, assets, grid measurements, change events, notifications, and job
+  completion now commit together.
+- [x] Add a unified site timeline that combines observations, jobs, events, reviews,
   assignments, and audit entries.
-- [ ] Issue controlled local asset upload/download references, preserving an interface
-  that can later support signed object-storage URLs.
+- [x] Issue controlled local asset download references and authenticated content
+  delivery, preserving an interface that can later support signed object-storage URLs.
 - [x] Implement recipient-scoped in-app notification reads, per-user notification
   preferences, and authorised site/event subscriptions.
 - [x] Implement deduplicated, preference-aware notification fan-out for detected
   change events and new assignments, with in-app/email local outbox records.
-- [ ] Implement external email sending, scheduled digest dispatch, exports, API
-  keys, and webhook management.
+- [x] Implement local CSV/GeoJSON export generation through a parameterised
+  Airflow worker, with checksum, expiry, audit, and controlled local download
+  references.
+- [x] Implement scoped, revocable, expiring API keys with accountable ownership,
+  one-time secret display, request-use tracking, and read/write/export enforcement.
+- [ ] Implement external email sending, scheduled digest dispatch, and webhook
+  management.
 - [x] Add the privileged operational audit query.
-- [ ] Add administration endpoints for failed jobs, reprocessing, and quotas.
+- [x] Add organisation usage visibility for members, sites, jobs, assets, storage,
+  API keys, and completed exports; quota enforcement remains a deployment decision.
+- [x] Add administration endpoints for failed jobs and reprocessing.
 - [x] Add signed cursor pagination, idempotency keys, optimistic concurrency, and
   consistent errors to the completed resource slices.
-- [ ] Add the remaining spatial/temporal filters and OpenAPI examples.
-- [ ] Version API contracts and publish a generated client for the frontend.
+- [x] Add temporal filters for observations, jobs, and events, signal-strength
+  filtering for events, and representative OpenAPI request examples.
+- [x] Version and publish the OpenAPI contract with a reproducible generator and
+  contract-drift check; downstream clients can now be generated from the committed
+  specification without coupling to frontend implementation.
 - [x] Add unit, integration, contract, authorization, RLS, concurrency, and spatial
   regression coverage for the completed slices.
-- [ ] Add end-to-end worker-callback and full human-review workflow coverage.
+- [x] Add end-to-end worker-callback coverage, including atomic publication of an
+  observation, asset, grid measurement, change event, and completed job. Human
+  review transitions are covered by the existing event integration tests.
 
 **Done when:** The MVP workflow works through OpenAPI with authentication and
 organisation isolation, stable contracts, idempotent writes, and auditability.
@@ -283,10 +295,10 @@ history without using the notebook or database console.
 - [x] Add event assignment, acceptance/decline/cancellation, comments, and
   resolution transitions to the API.
 - [ ] Add mentions and resolution service-level targets.
-- [ ] Export sites, grids, observations, and events as GeoJSON and CSV.
+- [x] Export site-scoped sites, grids, observations, and events as GeoJSON and CSV.
 - [ ] Generate a shareable PDF/HTML site or event report with provenance.
 - [ ] Permit authorized COG downloads and expose STAC/API access.
-- [ ] Add scoped, revocable, expiring API keys with usage logs.
+- [x] Add scoped, revocable, expiring API keys with usage logs.
 - [ ] Test notification failure, webhook replay, permission boundaries, exports,
   and large result sets.
 

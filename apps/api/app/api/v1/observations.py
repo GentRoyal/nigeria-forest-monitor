@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -40,17 +41,30 @@ def _require_site_access(principal: Principal) -> None:
         raise ApiError(403, "permission_denied", "Permission denied", "Your role cannot view observations.")
 
 
+def _time(value: datetime | None, field: str) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        raise ApiError(422, "invalid_time_range", "Invalid time range", f"{field} must include a timezone offset.")
+    return value.astimezone(UTC)
+
+
 @router.get("/sites/{site_id}/observations", response_model=ObservationListResponse)
 async def list_site_observations(
     site_id: UUID,
     request: Request,
     principal: Annotated[Principal, Depends(current_principal)],
     status: Annotated[str | None, Query(max_length=40)] = None,
+    observed_after: Annotated[datetime | None, Query()] = None,
+    observed_before: Annotated[datetime | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
 ) -> ObservationListResponse:
     _require_site_access(principal)
-    scope = cursor_scope({"organisation_id": str(principal.organisation_id), "site_id": str(site_id), "status": status})
+    observed_after, observed_before = _time(observed_after, "observed_after"), _time(observed_before, "observed_before")
+    if observed_after and observed_before and observed_after >= observed_before:
+        raise ApiError(422, "invalid_time_range", "Invalid time range", "observed_after must be earlier than observed_before.")
+    scope = cursor_scope({"organisation_id": str(principal.organisation_id), "site_id": str(site_id), "status": status, "observed_after": observed_after.isoformat() if observed_after else None, "observed_before": observed_before.isoformat() if observed_before else None})
     try:
         position = decode_cursor(cursor, scope=scope) if cursor else None
     except CursorError as error:
@@ -62,9 +76,11 @@ async def list_site_observations(
             FROM observations o JOIN sites s ON s.id=o.site_id
             WHERE o.site_id=%s AND s.status='active' AND ({visibility})
               AND (%s::text IS NULL OR o.status=%s)
+              AND (%s::timestamptz IS NULL OR o.observed_at>=%s)
+              AND (%s::timestamptz IS NULL OR o.observed_at<%s)
               AND (%s::timestamptz IS NULL OR (o.observed_at,o.id)<(%s,%s::uuid))
             ORDER BY o.observed_at DESC,o.id DESC LIMIT %s""",
-            (site_id, *visibility_params, status, status,
+            (site_id, *visibility_params, status, status, observed_after, observed_after, observed_before, observed_before,
              position.created_at if position else None, position.created_at if position else None,
              position.resource_id if position else None, limit + 1),
         )).fetchall()

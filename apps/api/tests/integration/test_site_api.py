@@ -1,4 +1,5 @@
 import os
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -769,3 +770,116 @@ def test_worker_claim_and_heartbeat_require_service_and_lease_credentials() -> N
         )
         assert failed.status_code == 200, failed.text
         assert failed.json()["data"]["status"] == "retry_wait"
+
+
+def test_worker_callbacks_publish_an_atomic_processing_result() -> None:
+    slug = f"worker-result-{uuid4().hex}"
+    now = datetime.now(UTC).isoformat()
+    with TestClient(app) as client:
+        user_headers = {"Authorization": f"Bearer {login(client)}"}
+        created_site = client.post("/api/v1/sites", headers=user_headers, json=site_payload(slug))
+        assert created_site.status_code == 201, created_site.text
+        site = created_site.json()["data"]
+        site_id = site["id"]
+        grid = client.post(
+            f"/api/v1/sites/{site_id}/grids/generate",
+            headers={**user_headers, "If-Match": created_site.headers["etag"]},
+            json={
+                "method": "square",
+                "resolution_metres": 5_000,
+                "clip_to_boundary": True,
+                "creation_reason": "Atomic worker result test",
+                "processing_compatibility": "v1",
+            },
+        )
+        assert grid.status_code == 201, grid.text
+        grid_id = grid.json()["data"]["id"]
+        cell = client.get(
+            f"/api/v1/sites/{site_id}/grid-cells",
+            headers=user_headers,
+            params={"grid_version_id": grid_id, "bbox": "2.9,7.9,3.2,8.2"},
+        )
+        assert cell.status_code == 200 and cell.json()["data"]
+        cell_id = cell.json()["data"][0]["id"]
+        requested = client.post(
+            f"/api/v1/sites/{site_id}/jobs",
+            headers={**user_headers, "Idempotency-Key": f"worker-result-{uuid4().hex}"},
+            json={"job_type": "discovery"},
+        )
+        assert requested.status_code == 201, requested.text
+        job_id = requested.json()["data"]["id"]
+        worker_headers = {
+            "X-Organisation-ID": str(ORGANISATION_ID),
+            "X-Worker-Token": "local-development-worker-token-change-me",
+        }
+        claimed = client.post(
+            f"/internal/v1/jobs/{job_id}/claim",
+            headers=worker_headers,
+            json={"worker_identity": "atomic-result-integration", "lease_seconds": 120},
+        )
+        assert claimed.status_code == 200, claimed.text
+        callback_headers = {**worker_headers, "X-Job-Lease-Token": claimed.json()["data"]["lease_token"]}
+        catalogue = client.post(
+            "/internal/v1/catalogue-items/upsert",
+            headers=callback_headers,
+            json={
+                "job_id": job_id,
+                "provider": "integration-provider",
+                "collection": "integration-sentinel",
+                "source_identifier": f"item-{uuid4().hex}",
+                "acquired_at": now,
+                "footprint": {"type": "Polygon", "coordinates": [[[3, 8], [3.2, 8], [3.2, 8.2], [3, 8.2], [3, 8]]]},
+                "licence": "test licence",
+                "attribution": "integration test",
+            },
+        )
+        assert catalogue.status_code == 200, catalogue.text
+        observation = client.post(
+            "/internal/v1/observations/upsert",
+            headers=callback_headers,
+            json={
+                "job_id": job_id,
+                "catalogue_item_id": catalogue.json()["data"]["id"],
+                "grid_version_id": grid_id,
+                "coverage_ratio": 0.95,
+                "quality_assessment": {"cloud_cover": 2},
+                "eligibility": "eligible",
+                "discovery_method": "manual",
+                "status": "ready",
+                "observed_at": now,
+            },
+        )
+        assert observation.status_code == 200, observation.text
+        completed = client.post(
+            f"/internal/v1/jobs/{job_id}/complete",
+            headers=callback_headers,
+            json={
+                "orchestrator_run_identifier": f"integration-{uuid4().hex}",
+                "dag_id": "integration_atomic_result",
+                "dag_version": "test-v1",
+                "observation_id": observation.json()["data"]["id"],
+                "boundary_version_id": site["current_boundary"]["id"],
+                "grid_version_id": grid_id,
+                "code_version": "integration-test",
+                "started_at": now,
+                "assets": [{"asset_type": "derived_cog", "object_key": f"integration/{uuid4().hex}.tif", "cog_valid": True, "size_bytes": 1024}],
+                "grid_observations": [{"grid_cell_id": cell_id, "measurements": {"ndvi": 0.72}}],
+                "events": [{
+                    "category": "possible_vegetation_loss",
+                    "geometry": {"type": "Polygon", "coordinates": [[[3, 8], [3.05, 8], [3.05, 8.05], [3, 8.05], [3, 8]]]},
+                    "signal_strength": 0.88,
+                    "grid_cells": [{"grid_cell_id": cell_id, "measurements": {"loss_score": 0.88}}],
+                }],
+            },
+        )
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["data"]["job"]["status"] == "completed"
+        assert client.get(f"/api/v1/jobs/{job_id}", headers=user_headers).json()["data"]["status"] == "completed"
+        events = client.get("/api/v1/events", headers=user_headers, params={"site_id": site_id})
+        assert events.status_code == 200
+        assert any(event["signal_strength"] == 0.88 for event in events.json()["data"])
+        assets = client.get(f"/api/v1/observations/{observation.json()['data']['id']}/assets", headers=user_headers)
+        assert assets.status_code == 200 and len(assets.json()["data"]) == 1
+        timeline = client.get(f"/api/v1/sites/{site_id}/timeline", headers=user_headers)
+        assert timeline.status_code == 200
+        assert {"job", "observation", "event"}.issubset({entry["entry_type"] for entry in timeline.json()["data"]})

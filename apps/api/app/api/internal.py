@@ -2,6 +2,8 @@ import hashlib
 import hmac
 import secrets
 from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
@@ -26,9 +28,10 @@ from ..schemas.workers import (
     WorkerCompleteRequest,
     WorkerCompleteResponse,
     WorkerDiscoveryCursorRequest,
+    WorkerExportCompleteRequest,
     WorkerFailureRequest,
-    WorkerFailureResponse,
-    WorkerHeartbeatRequest,
+        WorkerFailureResponse,
+        WorkerHeartbeatRequest,
     WorkerHeartbeatResponse,
     WorkerJobData,
     WorkerObservationData,
@@ -226,6 +229,77 @@ async def update_discovery_cursor(
     return {"cursor": payload.cursor}
 
 
+async def _export_for_claimed_job(connection, job_id: UUID, export_id: UUID):
+    export = await (await connection.execute(
+        """SELECT e.id,e.export_type,e.scope,e.filters,e.status FROM exports e
+        JOIN processing_jobs j ON j.requested_configuration->>'export_id'=e.id::text
+        WHERE e.id=%s AND j.id=%s FOR UPDATE""",
+        (export_id, job_id),
+    )).fetchone()
+    if not export:
+        raise ApiError(422, "invalid_export_job", "Invalid export job", "The export does not belong to the claimed job.")
+    return export
+
+
+@router.get("/exports/{export_id}/input")
+async def get_export_input(
+    export_id: UUID,
+    job_id: UUID,
+    principal: Annotated[WorkerPrincipal, Depends(current_worker)],
+    x_job_lease_token: Annotated[str | None, Header(alias="X-Job-Lease-Token")],
+) -> dict[str, object]:
+    if not x_job_lease_token:
+        raise ApiError(401, "job_lease_required", "Job lease required", "A current job lease token is required.")
+    async with tenant_connection(principal.organisation_id) as connection:
+        await _active_lease_job(connection, principal, job_id, x_job_lease_token)
+        export = await _export_for_claimed_job(connection, job_id, export_id)
+        resource = export["scope"]["resource"]
+        site_id = UUID(export["scope"]["site_id"])
+        queries = {
+            "sites": """SELECT s.id,s.name,s.slug,s.description,s.sensitivity,s.status,
+              ST_AsGeoJSON(b.geometry,9,0)::jsonb geometry FROM sites s
+              JOIN site_boundary_versions b ON b.id=s.current_boundary_version_id WHERE s.id=%s""",
+            "grids": """SELECT gc.id,gc.cell_key,gc.display_label,gc.area_sq_m,
+              ST_AsGeoJSON(gc.geometry,9,0)::jsonb geometry FROM grid_cells gc
+              JOIN grid_versions gv ON gv.id=gc.grid_version_id WHERE gv.site_id=%s""",
+            "observations": """SELECT id,observed_at,status,eligibility,coverage_ratio,quality_assessment
+              FROM observations WHERE site_id=%s ORDER BY observed_at DESC""",
+            "events": """SELECT id,category,affected_area_sq_m,signal_strength,review_status,sensitivity,
+              created_at,ST_AsGeoJSON(geometry,9,0)::jsonb geometry FROM change_events WHERE site_id=%s ORDER BY created_at DESC""",
+        }
+        rows = await (await connection.execute(queries[resource], (site_id,))).fetchall()
+        await connection.execute("UPDATE exports SET status='running' WHERE id=%s AND status='queued'", (export_id,))
+    return {"export_id": str(export_id), "export_type": export["export_type"], "resource": resource, "rows": rows}
+
+
+@router.post("/exports/{export_id}/complete")
+async def complete_export(
+    export_id: UUID,
+    payload: WorkerExportCompleteRequest,
+    principal: Annotated[WorkerPrincipal, Depends(current_worker)],
+    x_job_lease_token: Annotated[str | None, Header(alias="X-Job-Lease-Token")],
+) -> dict[str, str]:
+    if not x_job_lease_token:
+        raise ApiError(401, "job_lease_required", "Job lease required", "A current job lease token is required.")
+    async with tenant_connection(principal.organisation_id) as connection:
+        await _active_lease_job(connection, principal, payload.job_id, x_job_lease_token)
+        await _export_for_claimed_job(connection, payload.job_id, export_id)
+        root = Path(get_settings().export_root).resolve()
+        output = (root / payload.result_object_key).resolve()
+        if root not in output.parents or not output.is_file():
+            raise ApiError(422, "export_file_missing", "Export file missing", "The declared export file is unavailable to the API.")
+        actual_checksum = sha256(output.read_bytes()).hexdigest()
+        if not hmac.compare_digest(actual_checksum, payload.checksum):
+            raise ApiError(422, "export_checksum_mismatch", "Export checksum mismatch", "The declared checksum does not match the generated export.")
+        await connection.execute("UPDATE exports SET status='completed',result_object_key=%s,checksum=%s,expires_at=%s WHERE id=%s", (payload.result_object_key, payload.checksum, payload.expires_at, export_id))
+        await connection.execute("""UPDATE processing_jobs SET status='completed',progress=100,current_stage='completed',worker_identity=NULL,
+        lease_token_hash=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=now() WHERE id=%s""", (payload.job_id,))
+        await record_audit(connection, organisation_id=principal.organisation_id, actor_id=None,
+            action="export.completed", target_type="export", target_id=export_id,
+            after={"checksum": payload.checksum, "expires_at": payload.expires_at.isoformat()})
+    return {"status": "completed"}
+
+
 @router.post("/jobs/{job_id}/stages", response_model=WorkerStageResponse, status_code=201)
 async def record_job_stage(
     job_id: UUID,
@@ -369,11 +443,56 @@ async def complete_job(
             RETURNING id""",
             (principal.organisation_id, orchestration["id"], payload.observation_id, payload.boundary_version_id, payload.grid_version_id, Jsonb(payload.input_assets), Jsonb(payload.parameters), payload.code_version, payload.model_version, Jsonb(payload.environment), payload.started_at, Jsonb(payload.output_assets), Jsonb(payload.metrics), Jsonb(payload.warnings), payload.checksum),
         )).fetchone()
+        if (payload.assets or payload.grid_observations or payload.events) and not payload.observation_id:
+            raise ApiError(422, "completion_observation_required", "Observation required", "Assets, grid observations, and events require an observation.")
+        for asset in payload.assets:
+            await connection.execute(
+                """INSERT INTO raster_assets(organisation_id,observation_id,processing_run_id,asset_type,object_key,source_href,cog_valid,bands,resolution_metres,checksum,size_bytes,processing_version,lineage)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (principal.organisation_id, payload.observation_id, processing_run["id"], asset.asset_type, asset.object_key, asset.source_href, asset.cog_valid, Jsonb(asset.bands), asset.resolution_metres, asset.checksum, asset.size_bytes, asset.processing_version, Jsonb(asset.lineage)),
+            )
+        for measurement in payload.grid_observations:
+            valid_cell = await (await connection.execute(
+                """SELECT gc.id FROM grid_cells gc JOIN grid_versions gv ON gv.id=gc.grid_version_id
+                WHERE gc.id=%s AND gv.id=%s AND gv.site_id=%s""",
+                (measurement.grid_cell_id, payload.grid_version_id, job["site_id"]),
+            )).fetchone()
+            if not valid_cell:
+                raise ApiError(422, "invalid_grid_cell", "Invalid grid cell", "Every grid observation must belong to the claimed job grid.")
+            await connection.execute(
+                """INSERT INTO grid_observations(organisation_id,observation_id,grid_cell_id,processing_run_id,quality,measurements,change_features)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (organisation_id,observation_id,grid_cell_id,processing_run_id) DO UPDATE
+                SET quality=EXCLUDED.quality,measurements=EXCLUDED.measurements,change_features=EXCLUDED.change_features""",
+                (principal.organisation_id, payload.observation_id, measurement.grid_cell_id, processing_run["id"], Jsonb(measurement.quality), Jsonb(measurement.measurements), Jsonb(measurement.change_features)),
+            )
+        for event_input in payload.events:
+            event = await (await connection.execute(
+                """INSERT INTO change_events(organisation_id,site_id,observation_id,processing_run_id,category,geometry,affected_area_sq_m,signal_strength,sensitivity,resolution)
+                VALUES (%s,%s,%s,%s,%s,ST_SetSRID(ST_GeomFromGeoJSON(%s),4326),%s,%s,%s,%s)
+                RETURNING id""",
+                (principal.organisation_id, job["site_id"], payload.observation_id, processing_run["id"], event_input.category, event_input.geometry.model_dump_json(), event_input.affected_area_sq_m, event_input.signal_strength, event_input.sensitivity, event_input.resolution),
+            )).fetchone()
+            for cell in event_input.grid_cells:
+                valid_cell = await (await connection.execute(
+                    """SELECT gc.id FROM grid_cells gc JOIN grid_versions gv ON gv.id=gc.grid_version_id
+                    WHERE gc.id=%s AND gv.id=%s AND gv.site_id=%s""",
+                    (cell.grid_cell_id, payload.grid_version_id, job["site_id"]),
+                )).fetchone()
+                if not valid_cell:
+                    raise ApiError(422, "invalid_grid_cell", "Invalid grid cell", "Every event grid cell must belong to the claimed job grid.")
+                await connection.execute("INSERT INTO event_grid_cells(organisation_id,event_id,grid_cell_id,measurements) VALUES (%s,%s,%s,%s)", (principal.organisation_id, event["id"], cell.grid_cell_id, Jsonb(cell.measurements)))
+            await notify_event_subscribers(
+                connection, organisation_id=principal.organisation_id, site_id=job["site_id"], event_id=event["id"],
+                notification_type="change_event_detected", safe_summary="A new possible forest change requires review.",
+                sensitivity=event_input.sensitivity, protected_path=f"/events/{event['id']}",
+            )
+            await record_audit(connection, organisation_id=principal.organisation_id, actor_id=None, action="change_event.detected", target_type="change_event", target_id=event["id"], after={"job_id": str(job_id), "category": event_input.category, "grid_cell_count": len(event_input.grid_cells)})
         completed = await (await connection.execute(
             f"""UPDATE processing_jobs SET status='completed',progress=100,current_stage='completed',worker_identity=NULL,lease_token_hash=NULL,lease_expires_at=NULL,heartbeat_at=NULL,updated_at=now()
             WHERE id=%s RETURNING {_JOB_COLUMNS}""", (job_id,)
         )).fetchone()
-        await record_audit(connection, organisation_id=principal.organisation_id, actor_id=None, action="processing_job.completed", target_type="processing_job", target_id=job_id, after={"orchestrator_run_identifier": payload.orchestrator_run_identifier})
+        await record_audit(connection, organisation_id=principal.organisation_id, actor_id=None, action="processing_job.completed", target_type="processing_job", target_id=job_id, after={"orchestrator_run_identifier": payload.orchestrator_run_identifier, "asset_count": len(payload.assets), "grid_observation_count": len(payload.grid_observations), "event_count": len(payload.events)})
     return WorkerCompleteResponse(data=WorkerCompleteData(job=WorkerJobData.model_validate(completed), processing_run_id=processing_run["id"]))
 
 

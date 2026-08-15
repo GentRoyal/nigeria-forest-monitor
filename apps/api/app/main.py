@@ -27,6 +27,7 @@ app.add_middleware(
         "Idempotency-Key",
         "X-CSRF-Token",
         "X-Request-ID",
+        "X-API-Key",
     ],
 )
 app.add_middleware(RequestContextMiddleware)

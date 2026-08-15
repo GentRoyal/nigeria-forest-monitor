@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -40,6 +41,14 @@ def _meta(request: Request, *, next_cursor: str | None = None) -> JobListMeta:
     return JobListMeta(request_id=UUID(request.state.request_id), next_cursor=next_cursor)
 
 
+def _time(value: datetime | None, field: str) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        raise ApiError(422, "invalid_time_range", "Invalid time range", f"{field} must include a timezone offset.")
+    return value.astimezone(UTC)
+
+
 _JOB_COLUMNS = """
   id,site_id,observation_id,grid_version_id,retry_of_job_id,job_type,trigger_type,priority,
   status,progress,created_at,updated_at
@@ -55,16 +64,23 @@ async def list_jobs(
     job_type: Annotated[
         Literal["discovery", "processing", "reprocessing", "export"] | None, Query()
     ] = None,
+    created_after: Annotated[datetime | None, Query()] = None,
+    created_before: Annotated[datetime | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     cursor: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
 ) -> JobListResponse:
     _require_job_observability(principal)
+    created_after, created_before = _time(created_after, "created_after"), _time(created_before, "created_before")
+    if created_after and created_before and created_after >= created_before:
+        raise ApiError(422, "invalid_time_range", "Invalid time range", "created_after must be earlier than created_before.")
     scope = cursor_scope(
         {
             "organisation_id": str(principal.organisation_id),
             "site_id": str(site_id) if site_id else None,
             "status": status,
             "job_type": job_type,
+            "created_after": created_after.isoformat() if created_after else None,
+            "created_before": created_before.isoformat() if created_before else None,
         }
     )
     position = None
@@ -87,6 +103,8 @@ async def list_jobs(
             WHERE (%s::uuid IS NULL OR site_id=%s)
               AND (%s::text IS NULL OR status=%s)
               AND (%s::text IS NULL OR job_type=%s)
+              AND (%s::timestamptz IS NULL OR created_at>=%s)
+              AND (%s::timestamptz IS NULL OR created_at<%s)
               AND (%s::timestamptz IS NULL OR (created_at,id)<(%s,%s::uuid))
             ORDER BY created_at DESC,id DESC LIMIT %s""",
                 (
@@ -96,6 +114,10 @@ async def list_jobs(
                     status,
                     job_type,
                     job_type,
+                    created_after,
+                    created_after,
+                    created_before,
+                    created_before,
                     cursor_time,
                     cursor_time,
                     cursor_id,

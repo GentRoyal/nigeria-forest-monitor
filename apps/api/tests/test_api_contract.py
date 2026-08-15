@@ -1,4 +1,5 @@
 from apps.api.app.main import app
+from apps.api.app.settings import get_settings
 
 
 def test_first_authentication_batch_is_published_in_openapi() -> None:
@@ -178,3 +179,38 @@ def test_internal_worker_lease_batch_is_published() -> None:
     assert "post" in document["paths"]["/internal/v1/jobs/{job_id}/heartbeat"]
     assert "post" in document["paths"]["/internal/v1/jobs/{job_id}/stages"]
     assert "post" in document["paths"]["/internal/v1/jobs/{job_id}/fail"]
+
+
+def test_api_key_usage_and_export_worker_contracts_are_published() -> None:
+    document = app.openapi()
+    assert {"get", "post"}.issubset(document["paths"]["/api/v1/api-keys"])
+    assert "delete" in document["paths"]["/api/v1/api-keys/{key_id}"]
+    assert "get" in document["paths"]["/api/v1/admin/usage"]
+    assert "get" in document["paths"]["/api/v1/exports/{export_id}/content"]
+    assert "get" in document["paths"]["/internal/v1/exports/{export_id}/input"]
+    assert "post" in document["paths"]["/internal/v1/exports/{export_id}/complete"]
+
+    secret_fields = document["components"]["schemas"]["ApiKeyData"]["properties"]
+    assert "secret" not in secret_fields
+    assert "secret" in document["components"]["schemas"]["ApiKeyCreatedData"]["properties"]
+
+
+def test_site_timeline_and_atomic_worker_result_contracts_are_published() -> None:
+    document = app.openapi()
+    assert "get" in document["paths"]["/api/v1/sites/{site_id}/timeline"]
+    completion = document["components"]["schemas"]["WorkerCompleteRequest"]["properties"]
+    assert {"assets", "grid_observations", "events"}.issubset(completion)
+    assert "get" in document["paths"]["/api/v1/assets/{asset_id}/content"]
+
+
+def test_list_filters_and_export_example_are_published() -> None:
+    document = app.openapi()
+    event_parameters = {item["name"] for item in document["paths"]["/api/v1/events"]["get"]["parameters"]}
+    observation_parameters = {item["name"] for item in document["paths"]["/api/v1/sites/{site_id}/observations"]["get"]["parameters"]}
+    assert {"created_after", "created_before", "min_signal_strength"}.issubset(event_parameters)
+    assert {"observed_after", "observed_before"}.issubset(observation_parameters)
+    assert document["components"]["schemas"]["ExportCreateRequest"]["examples"]
+
+
+def test_openapi_contract_has_a_release_version() -> None:
+    assert app.openapi()["info"]["version"] == get_settings().api_version == "0.2.0"

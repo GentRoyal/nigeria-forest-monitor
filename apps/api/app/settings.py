@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="NFM_", env_file=".env", extra="ignore")
 
     environment: str = "local"
-    api_version: str = "0.1.0"
+    api_version: str = "0.2.0"
     database_url: str = "postgresql://forest_monitor:forest_monitor@localhost:5433/forest_monitor"
     cors_origins: str = "http://localhost:3000"
     access_token_secret: str = "local-development-signing-key-change-me"
@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     worker_service_token: str = "local-development-worker-token-change-me"
     scheduler_service_token: str = "local-development-scheduler-token-change-me"
     worker_lease_seconds: int = Field(default=300, ge=60, le=1800)
+    export_root: str = "data/exports"
+    asset_root: str = "data/assets"
     access_token_minutes: int = 15
     jwt_leeway_seconds: int = Field(default=30, ge=0, le=300)
     refresh_token_days: int = 14
