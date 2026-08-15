@@ -27,6 +27,7 @@ from ...schemas.sites import (
     GridVersionResponse,
     ScheduleData,
     ScheduleResponse,
+    ScheduleSuspendRequest,
     ScheduleUpsertRequest,
     SiteCreateRequest,
     SiteData,
@@ -1096,6 +1097,201 @@ async def put_site_schedule(
         )
     response.headers["ETag"] = _etag(schedule["id"], schedule["scheduling_version"])
     return ScheduleResponse(data=ScheduleData.model_validate(schedule), meta=_meta(request))
+
+
+async def _change_schedule_state(
+    *,
+    site_id: UUID,
+    request: Request,
+    principal: Principal,
+    if_match: str | None,
+    target_status: str,
+    suspension_reason: str | None = None,
+) -> ScheduleData:
+    _require_management(principal)
+    visibility, visibility_params = _visibility_sql(principal)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params, lock=True)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        current = await (
+            await connection.execute(
+                "SELECT id,site_id,cadence,sensor_settings,quality_settings,next_due_at,status,scheduling_version,changed_by,created_at,updated_at FROM monitoring_schedules WHERE site_id=%s AND status<>'archived' FOR UPDATE",
+                (site_id,),
+            )
+        ).fetchone()
+        if not current:
+            raise ApiError(
+                404,
+                "schedule_not_found",
+                "Schedule not found",
+                "This site does not have a monitoring schedule yet.",
+            )
+        expected = _expected_version(if_match, current["id"])
+        if current["scheduling_version"] != expected:
+            raise ApiError(
+                409,
+                "version_conflict",
+                "Resource version conflict",
+                "The schedule was changed after it was loaded.",
+                {"ETag": _etag(current["id"], current["scheduling_version"])},
+            )
+        if current["status"] == target_status:
+            raise ApiError(
+                409,
+                "schedule_state_conflict",
+                "Schedule state conflict",
+                f"The schedule is already {target_status}.",
+            )
+        if target_status == "suspended" and current["status"] != "active":
+            raise ApiError(
+                409,
+                "schedule_state_conflict",
+                "Schedule state conflict",
+                "Only an active schedule can be suspended.",
+            )
+        if target_status == "active" and current["status"] != "suspended":
+            raise ApiError(
+                409,
+                "schedule_state_conflict",
+                "Schedule state conflict",
+                "Only a suspended schedule can be resumed.",
+            )
+        next_due_at = (
+            _next_due_at(current["cadence"], datetime.now(UTC))
+            if target_status == "active"
+            else current["next_due_at"]
+        )
+        updated = await (
+            await connection.execute(
+                """UPDATE monitoring_schedules SET status=%s,suspension_reason=%s,next_due_at=%s,scheduling_version=scheduling_version+1,changed_by=%s,updated_at=now() WHERE id=%s RETURNING id,site_id,cadence,sensor_settings,quality_settings,next_due_at,status,scheduling_version,changed_by,created_at,updated_at""",
+                (target_status, suspension_reason, next_due_at, principal.user_id, current["id"]),
+            )
+        ).fetchone()
+        action = "schedule.suspended" if target_status == "suspended" else "schedule.resumed"
+        await record_audit(
+            connection,
+            organisation_id=principal.organisation_id,
+            actor_id=principal.user_id,
+            action=action,
+            target_type="monitoring_schedule",
+            target_id=current["id"],
+            before={"status": current["status"], "next_due_at": current["next_due_at"].isoformat()},
+            after={
+                "status": updated["status"],
+                "next_due_at": updated["next_due_at"].isoformat(),
+                "scheduling_version": updated["scheduling_version"],
+            },
+            reason=suspension_reason,
+            ip_address=_client_ip(request),
+        )
+    return ScheduleData.model_validate(updated)
+
+
+@router.post("/sites/{site_id}/schedule/suspend", response_model=ScheduleResponse)
+async def suspend_site_schedule(
+    site_id: UUID,
+    payload: ScheduleSuspendRequest,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(current_principal)],
+    if_match: Annotated[str | None, Header()] = None,
+) -> ScheduleResponse:
+    schedule = await _change_schedule_state(
+        site_id=site_id,
+        request=request,
+        principal=principal,
+        if_match=if_match,
+        target_status="suspended",
+        suspension_reason=payload.reason,
+    )
+    response.headers["ETag"] = _etag(schedule.id, schedule.scheduling_version)
+    return ScheduleResponse(data=schedule, meta=_meta(request))
+
+
+@router.post("/sites/{site_id}/schedule/resume", response_model=ScheduleResponse)
+async def resume_site_schedule(
+    site_id: UUID,
+    request: Request,
+    response: Response,
+    principal: Annotated[Principal, Depends(current_principal)],
+    if_match: Annotated[str | None, Header()] = None,
+) -> ScheduleResponse:
+    schedule = await _change_schedule_state(
+        site_id=site_id,
+        request=request,
+        principal=principal,
+        if_match=if_match,
+        target_status="active",
+    )
+    response.headers["ETag"] = _etag(schedule.id, schedule.scheduling_version)
+    return ScheduleResponse(data=schedule, meta=_meta(request))
+
+
+@router.delete("/sites/{site_id}/schedule", status_code=204)
+async def archive_site_schedule(
+    site_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+    if_match: Annotated[str | None, Header()] = None,
+) -> Response:
+    _require_management(principal)
+    visibility, visibility_params = _visibility_sql(principal)
+    async with tenant_connection(principal.organisation_id, principal.user_id) as connection:
+        site = await _load_site(connection, site_id, visibility, visibility_params, lock=True)
+        if not site:
+            raise ApiError(
+                404,
+                "site_not_found",
+                "Site not found",
+                "The site does not exist or is not available to you.",
+            )
+        current = await (
+            await connection.execute(
+                "SELECT id,status,scheduling_version FROM monitoring_schedules WHERE site_id=%s AND status<>'archived' FOR UPDATE",
+                (site_id,),
+            )
+        ).fetchone()
+        if not current:
+            raise ApiError(
+                404,
+                "schedule_not_found",
+                "Schedule not found",
+                "This site does not have a monitoring schedule yet.",
+            )
+        expected = _expected_version(if_match, current["id"])
+        if current["scheduling_version"] != expected:
+            raise ApiError(
+                409,
+                "version_conflict",
+                "Resource version conflict",
+                "The schedule was changed after it was loaded.",
+                {"ETag": _etag(current["id"], current["scheduling_version"])},
+            )
+        await connection.execute(
+            "UPDATE monitoring_schedules SET status='archived',suspension_reason=NULL,scheduling_version=scheduling_version+1,changed_by=%s,updated_at=now() WHERE id=%s",
+            (principal.user_id, current["id"]),
+        )
+        await record_audit(
+            connection,
+            organisation_id=principal.organisation_id,
+            actor_id=principal.user_id,
+            action="schedule.archived",
+            target_type="monitoring_schedule",
+            target_id=current["id"],
+            before={
+                "status": current["status"],
+                "scheduling_version": current["scheduling_version"],
+            },
+            after={"status": "archived", "scheduling_version": current["scheduling_version"] + 1},
+            ip_address=_client_ip(request),
+        )
+    return Response(status_code=204)
 
 
 @router.get("/sites/{site_id}/grid-cells", response_model=GridCellListResponse)

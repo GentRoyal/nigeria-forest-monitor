@@ -123,3 +123,10 @@ def test_initial_schedule_batch_is_published() -> None:
     assert {"get", "put"}.issubset(document["paths"]["/api/v1/sites/{site_id}/schedule"])
     schedule = document["components"]["schemas"]["ScheduleData"]["properties"]
     assert {"cadence", "next_due_at", "scheduling_version", "status"}.issubset(schedule)
+
+
+def test_schedule_lifecycle_batch_is_published() -> None:
+    document = app.openapi()
+    assert "post" in document["paths"]["/api/v1/sites/{site_id}/schedule/suspend"]
+    assert "post" in document["paths"]["/api/v1/sites/{site_id}/schedule/resume"]
+    assert "delete" in document["paths"]["/api/v1/sites/{site_id}/schedule"]

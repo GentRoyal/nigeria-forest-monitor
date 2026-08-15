@@ -205,6 +205,17 @@ class ScheduleUpsertRequest(BaseModel):
     quality_settings: dict[str, Any] = Field(default_factory=dict)
 
 
+class ScheduleSuspendRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=3, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        return value.strip()
+
+
 class ScheduleData(BaseModel):
     id: UUID
     site_id: UUID

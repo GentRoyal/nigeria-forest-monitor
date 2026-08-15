@@ -505,3 +505,49 @@ def test_schedule_create_read_and_versioned_replace() -> None:
             json=payload,
         )
         assert stale.status_code == 409
+
+
+def test_schedule_suspend_resume_and_archive() -> None:
+    slug = f"schedule-lifecycle-{uuid4().hex}"
+    payload = {"cadence": "monthly", "sensor_settings": {}, "quality_settings": {}}
+    with TestClient(app) as client:
+        headers = {"Authorization": f"Bearer {login(client)}"}
+        site = client.post("/api/v1/sites", headers=headers, json=site_payload(slug))
+        assert site.status_code == 201
+        site_id = site.json()["data"]["id"]
+        created = client.put(f"/api/v1/sites/{site_id}/schedule", headers=headers, json=payload)
+        assert created.status_code == 200
+        etag = created.headers["etag"]
+
+        suspended = client.post(
+            f"/api/v1/sites/{site_id}/schedule/suspend",
+            headers={**headers, "If-Match": etag},
+            json={"reason": "Awaiting approved field operations"},
+        )
+        assert suspended.status_code == 200, suspended.text
+        assert suspended.json()["data"]["status"] == "suspended"
+        suspended_etag = suspended.headers["etag"]
+
+        blocked_replace = client.put(
+            f"/api/v1/sites/{site_id}/schedule",
+            headers={**headers, "If-Match": suspended_etag},
+            json=payload,
+        )
+        assert blocked_replace.status_code == 409
+        resumed = client.post(
+            f"/api/v1/sites/{site_id}/schedule/resume",
+            headers={**headers, "If-Match": suspended_etag},
+        )
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json()["data"]["status"] == "active"
+        resumed_etag = resumed.headers["etag"]
+
+        archived = client.delete(
+            f"/api/v1/sites/{site_id}/schedule",
+            headers={**headers, "If-Match": resumed_etag},
+        )
+        assert archived.status_code == 204
+        assert client.get(f"/api/v1/sites/{site_id}/schedule", headers=headers).status_code == 404
+        replacement = client.put(f"/api/v1/sites/{site_id}/schedule", headers=headers, json=payload)
+        assert replacement.status_code == 200
+        assert replacement.json()["data"]["scheduling_version"] == 1
